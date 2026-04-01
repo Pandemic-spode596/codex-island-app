@@ -94,7 +94,28 @@ class ChatHistoryManager: ObservableObject {
             }
         }
 
-        return items.filter { !subagentToolIds.contains($0.id) }
+        return items.filter { !subagentToolIds.contains($0.id) && !isCodexInjectedItem($0) }
+    }
+
+    private func isCodexInjectedItem(_ item: ChatHistoryItem) -> Bool {
+        switch item.type {
+        case .user(let text), .assistant(let text):
+            return isCodexInjectedText(text)
+        case .toolCall, .thinking, .interrupted:
+            return false
+        }
+    }
+
+    private func isCodexInjectedText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("# AGENTS.md instructions for ") ||
+        trimmed.hasPrefix("<environment_context>") ||
+        trimmed.hasPrefix("<permissions instructions>") ||
+        trimmed.hasPrefix("<collaboration_mode>") ||
+        trimmed.hasPrefix("<skills_instructions>") ||
+        trimmed.hasPrefix("<plugins_instructions>") ||
+        trimmed.hasPrefix("<apps_instructions>") ||
+        trimmed.hasPrefix("<user_instructions>")
     }
 }
 

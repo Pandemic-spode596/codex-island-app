@@ -203,8 +203,14 @@ actor CodexConversationParser {
 
         switch payloadType {
         case "message":
-            let role = (payload["role"] as? String).flatMap(ChatRole.init(rawValue:)) ?? .assistant
-            let blocks = parseMessageBlocks(payload["content"] as? [[String: Any]])
+            let rawRole = payload["role"] as? String
+            guard rawRole != "developer", rawRole != "system" else { return }
+
+            let role = rawRole.flatMap(ChatRole.init(rawValue:)) ?? .assistant
+            let blocks = parseMessageBlocks(payload["content"] as? [[String: Any]]).filter { block in
+                guard case .text(let text) = block else { return true }
+                return !isCodexInjectedText(text)
+            }
             guard !blocks.isEmpty else { return }
             messages.append(ChatMessage(
                 id: "codex-message-\(lineIndex)",
@@ -439,6 +445,18 @@ actor CodexConversationParser {
                 return nil
             }
         }
+    }
+
+    private func isCodexInjectedText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("# AGENTS.md instructions for ") ||
+        trimmed.hasPrefix("<environment_context>") ||
+        trimmed.hasPrefix("<permissions instructions>") ||
+        trimmed.hasPrefix("<collaboration_mode>") ||
+        trimmed.hasPrefix("<skills_instructions>") ||
+        trimmed.hasPrefix("<plugins_instructions>") ||
+        trimmed.hasPrefix("<apps_instructions>") ||
+        trimmed.hasPrefix("<user_instructions>")
     }
 
     private func parseReasoningText(_ payload: [String: Any]) -> String {
