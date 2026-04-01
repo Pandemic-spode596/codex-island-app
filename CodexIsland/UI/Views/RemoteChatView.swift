@@ -61,11 +61,13 @@ struct RemoteChatView: View {
             }
         }
         .task {
-            if let updated = try? await remoteSessionMonitor.openThread(
-                hostId: initialThread.hostId,
-                threadId: initialThread.threadId
-            ) {
-                thread = updated
+            if !initialThread.isLoaded {
+                if let updated = try? await remoteSessionMonitor.openThread(
+                    hostId: initialThread.hostId,
+                    threadId: initialThread.threadId
+                ) {
+                    thread = updated
+                }
             }
         }
         .onReceive(remoteSessionMonitor.$threads) { threads in

@@ -48,8 +48,10 @@ final class RemoteSessionMonitor: ObservableObject {
     @Published private(set) var threads: [RemoteThreadState] = []
     @Published private(set) var hostStates: [String: RemoteHostConnectionState] = [:]
     @Published private(set) var hostActionErrors: [String: String] = [:]
+    @Published private(set) var hostActionInProgress: Set<String> = []
 
     private var connections: [String: RemoteAppServerConnection] = [:]
+    private var hostActionTasks: [String: Task<Void, Never>] = [:]
 
     private init() {
         self.hosts = AppSettings.remoteHosts
@@ -57,6 +59,43 @@ final class RemoteSessionMonitor: ObservableObject {
 
     func startMonitoring() {
         syncConnections()
+    }
+
+    func createThread(
+        hostId: String,
+        onSuccess: @escaping @MainActor (RemoteThreadState) -> Void
+    ) {
+        hostActionErrors.removeValue(forKey: hostId)
+        hostActionInProgress.insert(hostId)
+        hostActionTasks[hostId]?.cancel()
+
+        hostActionTasks[hostId] = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor in
+                    self.hostActionInProgress.remove(hostId)
+                    self.hostActionTasks.removeValue(forKey: hostId)
+                }
+            }
+
+            do {
+                let thread = try await self.startThread(hostId: hostId)
+                await onSuccess(thread)
+            } catch {
+                await MainActor.run {
+                    if let state = self.hostStates[hostId],
+                       case .failed(let message) = state,
+                       !message.isEmpty {
+                        self.hostActionErrors[hostId] = message
+                    } else if error is CancellationError {
+                        self.hostActionErrors[hostId] = "Remote request was canceled. Reconnect and retry."
+                    } else {
+                        self.hostActionErrors[hostId] = error.localizedDescription
+                    }
+                }
+                return
+            }
+        }
     }
 
     func addHost() {
@@ -96,12 +135,19 @@ final class RemoteSessionMonitor: ObservableObject {
             updateHost(updated)
             return
         }
+        if let connection = connections.removeValue(forKey: id) {
+            Task { await connection.stop() }
+        }
+        hostStates[id] = .connecting
         syncConnections()
     }
 
     func disconnectHost(id: String) {
         hostStates[id] = .disconnected
         hostActionErrors.removeValue(forKey: id)
+        hostActionInProgress.remove(id)
+        hostActionTasks[id]?.cancel()
+        hostActionTasks.removeValue(forKey: id)
         if let connection = connections.removeValue(forKey: id) {
             Task { await connection.stop() }
         }
@@ -612,6 +658,7 @@ actor RemoteAppServerConnection {
     private var pendingRequests: [Int: CheckedContinuation<AnyCodable?, Error>] = [:]
     private var latestStderr: String = ""
     private let requestTimeoutNs: UInt64 = 10_000_000_000
+    private var isStopping = false
 
     init(
         host: RemoteHostConfig,
@@ -635,6 +682,7 @@ actor RemoteAppServerConnection {
 
     func start() async {
         guard process == nil else { return }
+        isStopping = false
         guard host.isValid else {
             await emit(.connectionState(hostId: host.id, state: .failed("SSH target required")))
             return
@@ -689,6 +737,7 @@ actor RemoteAppServerConnection {
     }
 
     func stop() async {
+        isStopping = true
         refreshTask?.cancel()
         stdoutTask?.cancel()
         stderrTask?.cancel()
@@ -802,6 +851,10 @@ actor RemoteAppServerConnection {
                     await self.handleLine(String(line))
                 }
             } catch {
+                let isStopping = await self.isStopping
+                if error is CancellationError || isStopping {
+                    return
+                }
                 await self.emit(.connectionState(hostId: self.host.id, state: .failed(error.localizedDescription)))
             }
         }
@@ -959,6 +1012,9 @@ actor RemoteAppServerConnection {
     }
 
     private func handleTermination(exitCode: Int32) async {
+        if isStopping {
+            return
+        }
         let message: String
         if latestStderr.isEmpty {
             message = exitCode == 0 ? "Disconnected" : "SSH exited with code \(exitCode)"

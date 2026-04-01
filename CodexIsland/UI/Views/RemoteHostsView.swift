@@ -30,20 +30,14 @@ struct RemoteHostsView: View {
                                 host: host,
                                 state: remoteSessionMonitor.hostStates[host.id] ?? .disconnected,
                                 actionError: remoteSessionMonitor.hostActionErrors[host.id],
+                                isStartingThread: remoteSessionMonitor.hostActionInProgress.contains(host.id),
                                 onChange: { remoteSessionMonitor.updateHost($0) },
                                 onRemove: { remoteSessionMonitor.removeHost(id: host.id) },
                                 onConnect: { remoteSessionMonitor.connectHost(id: host.id) },
                                 onDisconnect: { remoteSessionMonitor.disconnectHost(id: host.id) },
                                 onStartThread: {
-                                    Task.detached(priority: .userInitiated) {
-                                        do {
-                                            let thread = try await remoteSessionMonitor.startThread(hostId: host.id)
-                                            await MainActor.run {
-                                                viewModel.showRemoteChat(for: thread)
-                                            }
-                                        } catch {
-                                            return
-                                        }
+                                    remoteSessionMonitor.createThread(hostId: host.id) { thread in
+                                        viewModel.showRemoteChat(for: thread)
                                     }
                                 }
                             )
@@ -97,6 +91,7 @@ private struct RemoteHostCard: View {
     let host: RemoteHostConfig
     let state: RemoteHostConnectionState
     let actionError: String?
+    let isStartingThread: Bool
     let onChange: (RemoteHostConfig) -> Void
     let onRemove: () -> Void
     let onConnect: () -> Void
@@ -109,6 +104,7 @@ private struct RemoteHostCard: View {
         host: RemoteHostConfig,
         state: RemoteHostConnectionState,
         actionError: String?,
+        isStartingThread: Bool,
         onChange: @escaping (RemoteHostConfig) -> Void,
         onRemove: @escaping () -> Void,
         onConnect: @escaping () -> Void,
@@ -118,6 +114,7 @@ private struct RemoteHostCard: View {
         self.host = host
         self.state = state
         self.actionError = actionError
+        self.isStartingThread = isStartingThread
         self.onChange = onChange
         self.onRemove = onRemove
         self.onConnect = onConnect
@@ -174,7 +171,7 @@ private struct RemoteHostCard: View {
                 .disabled(!draft.isValid)
 
                 if state.isConnected {
-                    Button("New Thread") {
+                    Button(isStartingThread ? "Starting..." : "New Thread") {
                         onStartThread()
                     }
                     .buttonStyle(.plain)
@@ -184,6 +181,7 @@ private struct RemoteHostCard: View {
                     .padding(.vertical, 6)
                     .background(Color.white.opacity(0.12))
                     .clipShape(Capsule())
+                    .disabled(isStartingThread)
                 }
 
                 Spacer()
