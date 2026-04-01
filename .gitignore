@@ -58,3 +58,11 @@ target/
 .[!.]*/
 !.git/
 !.github/
+
+# Local workflow state
+.beads/
+.memory-bank/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
