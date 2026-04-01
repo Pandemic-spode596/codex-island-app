@@ -61,6 +61,7 @@ struct RemoteChatView: View {
             }
         }
         .task {
+            remoteSessionMonitor.refreshHost(id: initialThread.hostId)
             if !initialThread.isLoaded {
                 if let updated = try? await remoteSessionMonitor.openThread(
                     hostId: initialThread.hostId,

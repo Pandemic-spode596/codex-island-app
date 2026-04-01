@@ -128,6 +128,26 @@ enum RemoteAppServerTurnStatus: String, Codable, Equatable, Sendable {
 
 struct RemoteAppServerTurnError: Codable, Equatable, Sendable {
     let message: String
+    let additionalDetails: String?
+}
+
+struct RemoteAppServerErrorNotification: Codable, Sendable {
+    let error: RemoteAppServerTurnError
+    let willRetry: Bool
+    let threadId: String
+    let turnId: String
+}
+
+struct RemoteAppServerCodexEventErrorNotification: Codable, Sendable {
+    let id: String
+    let msg: RemoteAppServerCodexEventErrorPayload
+    let conversationId: String
+}
+
+struct RemoteAppServerCodexEventErrorPayload: Codable, Sendable {
+    let type: String
+    let message: String
+    let additionalDetails: String?
 }
 
 enum RemoteAppServerUserInput: Codable, Equatable, Sendable {

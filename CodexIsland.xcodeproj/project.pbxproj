@@ -12,8 +12,19 @@
 		FDA49F7E2EE11E3C00F9612E /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = FDA49F7F2EE11E3C00F9612E /* Sparkle */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		FDBA10072F0A0001002A6501 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FD33FD552EDF32D7002A6548 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FD33FD5C2EDF32D7002A6548;
+			remoteInfo = CodexIsland;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		FD33FD5D2EDF32D7002A6548 /* Codex Island.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Codex Island.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FDBA10012F0A0001002A6501 /* CodexIslandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexIslandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -35,6 +46,11 @@
 			path = CodexIsland;
 			sourceTree = "<group>";
 		};
+		FDBA10022F0A0001002A6501 /* CodexIslandTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CodexIslandTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -48,6 +64,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FDBA10032F0A0001002A6501 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -55,6 +78,7 @@
 			isa = PBXGroup;
 			children = (
 				FD33FD5F2EDF32D7002A6548 /* CodexIsland */,
+				FDBA10022F0A0001002A6501 /* CodexIslandTests */,
 				FD33FD5E2EDF32D7002A6548 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -63,6 +87,7 @@
 			isa = PBXGroup;
 			children = (
 				FD33FD5D2EDF32D7002A6548 /* Codex Island.app */,
+				FDBA10012F0A0001002A6501 /* CodexIslandTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,6 +120,29 @@
 			productReference = FD33FD5D2EDF32D7002A6548 /* Codex Island.app */;
 			productType = "com.apple.product-type.application";
 		};
+		FDBA10062F0A0001002A6501 /* CodexIslandTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FDBA100B2F0A0001002A6501 /* Build configuration list for PBXNativeTarget "CodexIslandTests" */;
+			buildPhases = (
+				FDBA10042F0A0001002A6501 /* Sources */,
+				FDBA10032F0A0001002A6501 /* Frameworks */,
+				FDBA10052F0A0001002A6501 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FDBA10082F0A0001002A6501 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				FDBA10022F0A0001002A6501 /* CodexIslandTests */,
+			);
+			name = CodexIslandTests;
+			packageProductDependencies = (
+			);
+			productName = CodexIslandTests;
+			productReference = FDBA10012F0A0001002A6501 /* CodexIslandTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -107,6 +155,10 @@
 				TargetAttributes = {
 					FD33FD5C2EDF32D7002A6548 = {
 						CreatedOnToolsVersion = 26.1.1;
+					};
+					FDBA10062F0A0001002A6501 = {
+						CreatedOnToolsVersion = 26.1.1;
+						TestTargetID = FD33FD5C2EDF32D7002A6548;
 					};
 				};
 			};
@@ -130,12 +182,20 @@
 			projectRoot = "";
 			targets = (
 				FD33FD5C2EDF32D7002A6548 /* CodexIsland */,
+				FDBA10062F0A0001002A6501 /* CodexIslandTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		FD33FD5B2EDF32D7002A6548 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDBA10052F0A0001002A6501 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -152,7 +212,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FDBA10042F0A0001002A6501 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FDBA10082F0A0001002A6501 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FD33FD5C2EDF32D7002A6548 /* CodexIsland */;
+			targetProxy = FDBA10072F0A0001002A6501 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		FD33FD662EDF32D8002A6548 /* Debug */ = {
@@ -278,10 +353,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = CodexIsland/Resources/CodexIsland.entitlements;
-				CODE_SIGN_STYLE = Manual;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_ENTITLEMENTS = CodexIsland/Resources/CodexIsland.entitlements;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 3;
 				ENABLE_APP_SANDBOX = NO;
@@ -314,10 +389,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = CodexIsland/Resources/CodexIsland.entitlements;
-				CODE_SIGN_STYLE = Manual;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_ENTITLEMENTS = CodexIsland/Resources/CodexIsland.entitlements;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 3;
 				ENABLE_APP_SANDBOX = NO;
@@ -345,6 +420,96 @@
 			};
 			name = Release;
 		};
+		FDBA10092F0A0001002A6501 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundlePackageType = BNDL;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+					"$(BUILT_PRODUCTS_DIR)/PackageFrameworks",
+				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					XCTest,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.celestial.CodexIslandTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Codex Island.app/Contents/MacOS/Codex Island";
+				TEST_TARGET_NAME = CodexIsland;
+			};
+			name = Debug;
+		};
+		FDBA100A2F0A0001002A6501 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundlePackageType = BNDL;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+					"$(BUILT_PRODUCTS_DIR)/PackageFrameworks",
+				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					XCTest,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.celestial.CodexIslandTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_INCLUDE_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Codex Island.app/Contents/MacOS/Codex Island";
+				TEST_TARGET_NAME = CodexIsland;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -362,6 +527,15 @@
 			buildConfigurations = (
 				FD33FD692EDF32D8002A6548 /* Debug */,
 				FD33FD6A2EDF32D8002A6548 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FDBA100B2F0A0001002A6501 /* Build configuration list for PBXNativeTarget "CodexIslandTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FDBA10092F0A0001002A6501 /* Debug */,
+				FDBA100A2F0A0001002A6501 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

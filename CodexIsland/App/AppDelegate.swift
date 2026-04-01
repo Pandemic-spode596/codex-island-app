@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowManager: WindowManager?
     private var screenObserver: ScreenObserver?
     private var updateCheckTimer: Timer?
+    private let isRunningTests = Foundation.ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     static var shared: AppDelegate?
     let updater: SPUUpdater
@@ -28,14 +29,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
         AppDelegate.shared = self
 
-        do {
-            try updater.start()
-        } catch {
-            print("Failed to start Sparkle updater: \(error)")
+        if !isRunningTests {
+            do {
+                try updater.start()
+            } catch {
+                print("Failed to start Sparkle updater: \(error)")
+            }
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isRunningTests else {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            return
+        }
+
         if !ensureSingleInstance() {
             NSApplication.shared.terminate(nil)
             return
@@ -92,6 +100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        guard !isRunningTests else { return }
         Mixpanel.mainInstance().flush()
         updateCheckTimer?.invalidate()
         screenObserver = nil

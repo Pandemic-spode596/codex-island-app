@@ -19,6 +19,7 @@ enum RemoteConnectionEvent: Sendable {
     case itemCompleted(hostId: String, threadId: String, turnId: String, item: RemoteAppServerThreadItem)
     case agentMessageDelta(hostId: String, threadId: String, turnId: String, itemId: String, delta: String)
     case approval(hostId: String, threadId: String, approval: RemotePendingApproval)
+    case threadError(hostId: String, threadId: String, turnId: String?, message: String, willRetry: Bool)
 }
 
 enum RemoteSessionError: LocalizedError {
@@ -40,6 +41,38 @@ enum RemoteSessionError: LocalizedError {
     }
 }
 
+protocol RemoteAppServerConnectionProtocol: Sendable {
+    func updateHost(_ host: RemoteHostConfig) async
+    func start() async
+    func stop() async
+    func startThread(defaultCwd: String) async throws -> RemoteAppServerThread
+    func resumeThread(threadId: String) async throws -> RemoteAppServerThread
+    func sendMessage(threadId: String, text: String, activeTurnId: String?) async throws
+    func interrupt(threadId: String, turnId: String) async throws
+    func respond(to approval: RemotePendingApproval, allow: Bool) async throws
+    func refreshThreads() async throws
+}
+
+struct RemoteAppServerConnectionDependencies: Sendable {
+    let transportFactory: @Sendable (RemoteHostConfig) -> any RemoteAppServerTransport
+    let processExecutor: any ProcessExecuting
+    let diagnosticsLogger: any RemoteDiagnosticsLogging
+    let requestTimeout: Duration
+    let refreshInterval: Duration
+    let sleep: @Sendable (Duration) async throws -> Void
+
+    static let live = RemoteAppServerConnectionDependencies(
+        transportFactory: { SSHStdioTransport(host: $0) },
+        processExecutor: ProcessExecutor.shared,
+        diagnosticsLogger: RemoteDiagnosticsLogger.shared,
+        requestTimeout: .seconds(10),
+        refreshInterval: .seconds(15),
+        sleep: { duration in
+            try await Task.sleep(for: duration)
+        }
+    )
+}
+
 @MainActor
 final class RemoteSessionMonitor: ObservableObject {
     static let shared = RemoteSessionMonitor()
@@ -50,11 +83,36 @@ final class RemoteSessionMonitor: ObservableObject {
     @Published private(set) var hostActionErrors: [String: String] = [:]
     @Published private(set) var hostActionInProgress: Set<String> = []
 
-    private var connections: [String: RemoteAppServerConnection] = [:]
+    private let saveHosts: @Sendable ([RemoteHostConfig]) -> Void
+    private let connectionFactory: @Sendable (
+        RemoteHostConfig,
+        @escaping @Sendable (RemoteConnectionEvent) async -> Void
+    ) -> any RemoteAppServerConnectionProtocol
+    private let diagnosticsLogger: any RemoteDiagnosticsLogging
+
+    private var connections: [String: any RemoteAppServerConnectionProtocol] = [:]
     private var hostActionTasks: [String: Task<Void, Never>] = [:]
 
-    private init() {
-        self.hosts = AppSettings.remoteHosts
+    init(
+        initialHosts: [RemoteHostConfig]? = nil,
+        loadHosts: @escaping @Sendable () -> [RemoteHostConfig] = { AppSettings.remoteHosts },
+        saveHosts: @escaping @Sendable ([RemoteHostConfig]) -> Void = { AppSettings.remoteHosts = $0 },
+        diagnosticsLogger: any RemoteDiagnosticsLogging = RemoteDiagnosticsLogger.shared,
+        connectionFactory: @escaping @Sendable (
+            RemoteHostConfig,
+            @escaping @Sendable (RemoteConnectionEvent) async -> Void
+        ) -> any RemoteAppServerConnectionProtocol = { host, emit in
+            RemoteAppServerConnection(host: host, emit: emit)
+        }
+    ) {
+        self.hosts = initialHosts ?? loadHosts()
+        self.saveHosts = saveHosts
+        self.diagnosticsLogger = diagnosticsLogger
+        self.connectionFactory = connectionFactory
+    }
+
+    private func markStateChanged() {
+        objectWillChange.send()
     }
 
     func startMonitoring() {
@@ -65,6 +123,7 @@ final class RemoteSessionMonitor: ObservableObject {
         hostId: String,
         onSuccess: @escaping @MainActor (RemoteThreadState) -> Void
     ) {
+        markStateChanged()
         hostActionErrors.removeValue(forKey: hostId)
         hostActionInProgress.insert(hostId)
         hostActionTasks[hostId]?.cancel()
@@ -73,6 +132,7 @@ final class RemoteSessionMonitor: ObservableObject {
             guard let self else { return }
             defer {
                 Task { @MainActor in
+                    self.markStateChanged()
                     self.hostActionInProgress.remove(hostId)
                     self.hostActionTasks.removeValue(forKey: hostId)
                 }
@@ -83,6 +143,7 @@ final class RemoteSessionMonitor: ObservableObject {
                 await onSuccess(thread)
             } catch {
                 await MainActor.run {
+                    self.markStateChanged()
                     if let state = self.hostStates[hostId],
                        case .failed(let message) = state,
                        !message.isEmpty {
@@ -98,6 +159,26 @@ final class RemoteSessionMonitor: ObservableObject {
         }
     }
 
+    func refreshHost(id: String) {
+        guard let connection = connections[id] else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await connection.refreshThreads()
+                self.hostActionErrors.removeValue(forKey: id)
+            } catch {
+                self.hostActionErrors[id] = error.localizedDescription
+                await self.logMonitorEvent(
+                    level: .warning,
+                    hostId: id,
+                    method: "thread/list",
+                    message: "Manual refresh failed",
+                    payload: error.localizedDescription
+                )
+            }
+        }
+    }
+
     func addHost() {
         hosts.append(RemoteHostConfig())
         persistHosts()
@@ -107,7 +188,7 @@ final class RemoteSessionMonitor: ObservableObject {
         guard let index = hosts.firstIndex(where: { $0.id == host.id }) else { return }
         let previous = hosts[index]
         hosts[index] = host
-        AppSettings.remoteHosts = hosts
+        saveHosts(hosts)
 
         let connectionState = hostStates[host.id] ?? .disconnected
         let shouldSync = previous.isEnabled != host.isEnabled || !connectionState.isConnected
@@ -117,6 +198,7 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     func removeHost(id: String) {
+        markStateChanged()
         hosts.removeAll { $0.id == id }
         hostStates.removeValue(forKey: id)
         threads.removeAll { $0.hostId == id }
@@ -128,6 +210,7 @@ final class RemoteSessionMonitor: ObservableObject {
 
     func connectHost(id: String) {
         guard let host = hosts.first(where: { $0.id == id }) else { return }
+        markStateChanged()
         if case .connecting = hostStates[id] {
             return
         }
@@ -146,6 +229,7 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     func disconnectHost(id: String) {
+        markStateChanged()
         hostStates[id] = .disconnected
         hostActionErrors.removeValue(forKey: id)
         hostActionInProgress.remove(id)
@@ -163,11 +247,24 @@ final class RemoteSessionMonitor: ObservableObject {
         guard let connection = connections[hostId] else {
             throw RemoteSessionError.notConnected
         }
+        let existingThreadIds = Set(
+            threads
+                .filter { $0.hostId == hostId }
+                .map(\.threadId)
+        )
 
         do {
             let thread = try await connection.startThread(defaultCwd: host.defaultCwd)
+            markStateChanged()
             hostActionErrors.removeValue(forKey: hostId)
             apply(event: .threadUpsert(hostId: hostId, thread: thread))
+            await logMonitorEvent(
+                level: .info,
+                hostId: hostId,
+                method: "thread/start",
+                threadId: thread.id,
+                message: "Started remote thread"
+            )
             Task {
                 try? await connection.refreshThreads()
             }
@@ -176,7 +273,29 @@ final class RemoteSessionMonitor: ObservableObject {
             }
             return state
         } catch {
+            markStateChanged()
+            if case .timeout = (error as? RemoteSessionError) {
+                try? await connection.refreshThreads()
+                if let recovered = recoverNewThread(hostId: hostId, excluding: existingThreadIds) {
+                    hostActionErrors.removeValue(forKey: hostId)
+                    await logMonitorEvent(
+                        level: .warning,
+                        hostId: hostId,
+                        method: "thread/start",
+                        threadId: recovered.threadId,
+                        message: "Recovered remote thread after timeout fallback"
+                    )
+                    return recovered
+                }
+            }
             hostActionErrors[hostId] = error.localizedDescription
+            await logMonitorEvent(
+                level: .error,
+                hostId: hostId,
+                method: "thread/start",
+                message: "Failed to start remote thread",
+                payload: error.localizedDescription
+            )
             throw error
         }
     }
@@ -188,8 +307,16 @@ final class RemoteSessionMonitor: ObservableObject {
 
         do {
             let thread = try await connection.resumeThread(threadId: threadId)
+            markStateChanged()
             hostActionErrors.removeValue(forKey: hostId)
             apply(event: .threadUpsert(hostId: hostId, thread: thread))
+            await logMonitorEvent(
+                level: .info,
+                hostId: hostId,
+                method: "thread/resume",
+                threadId: thread.id,
+                message: "Opened remote thread"
+            )
             Task {
                 try? await connection.refreshThreads()
             }
@@ -198,7 +325,16 @@ final class RemoteSessionMonitor: ObservableObject {
             }
             return state
         } catch {
+            markStateChanged()
             hostActionErrors[hostId] = error.localizedDescription
+            await logMonitorEvent(
+                level: .error,
+                hostId: hostId,
+                method: "thread/resume",
+                threadId: threadId,
+                message: "Failed to open remote thread",
+                payload: error.localizedDescription
+            )
             throw error
         }
     }
@@ -207,11 +343,49 @@ final class RemoteSessionMonitor: ObservableObject {
         guard let connection = connections[thread.hostId] else {
             throw RemoteSessionError.notConnected
         }
-        try await connection.sendMessage(
-            threadId: thread.threadId,
-            text: text,
-            activeTurnId: thread.canSteerTurn ? thread.activeTurnId : nil
-        )
+        appendOptimisticUserMessage(thread: thread, text: text)
+        defer {
+            refreshHost(id: thread.hostId)
+        }
+        do {
+            try await connection.sendMessage(
+                threadId: thread.threadId,
+                text: text,
+                activeTurnId: thread.canSteerTurn ? thread.activeTurnId : nil
+            )
+            await logMonitorEvent(
+                level: .info,
+                hostId: thread.hostId,
+                method: thread.canSteerTurn ? "turn/steer" : "turn/start",
+                threadId: thread.threadId,
+                turnId: thread.activeTurnId,
+                message: "Sent remote user message",
+                payload: text
+            )
+        } catch {
+            if case .timeout = (error as? RemoteSessionError) {
+                await logMonitorEvent(
+                    level: .warning,
+                    hostId: thread.hostId,
+                    method: thread.canSteerTurn ? "turn/steer" : "turn/start",
+                    threadId: thread.threadId,
+                    turnId: thread.activeTurnId,
+                    message: "Remote message send timed out; awaiting async events",
+                    payload: text
+                )
+                return
+            }
+            await logMonitorEvent(
+                level: .error,
+                hostId: thread.hostId,
+                method: thread.canSteerTurn ? "turn/steer" : "turn/start",
+                threadId: thread.threadId,
+                turnId: thread.activeTurnId,
+                message: "Remote message send failed",
+                payload: error.localizedDescription
+            )
+            throw error
+        }
     }
 
     func interrupt(thread: RemoteThreadState) async throws {
@@ -245,7 +419,7 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     private func persistHosts() {
-        AppSettings.remoteHosts = hosts
+        saveHosts(hosts)
         syncConnections()
     }
 
@@ -264,9 +438,9 @@ final class RemoteSessionMonitor: ObservableObject {
             if let connection = connections[id] {
                 Task { await connection.updateHost(host) }
             } else {
-                let connection = RemoteAppServerConnection(host: host) { event in
+                let connection = connectionFactory(host) { [weak self] event in
                     await MainActor.run {
-                        RemoteSessionMonitor.shared.apply(event: event)
+                        self?.apply(event: event)
                     }
                 }
                 connections[id] = connection
@@ -275,7 +449,8 @@ final class RemoteSessionMonitor: ObservableObject {
         }
     }
 
-    private func apply(event: RemoteConnectionEvent) {
+    func apply(event: RemoteConnectionEvent) {
+        markStateChanged()
         switch event {
         case .connectionState(let hostId, let state):
             hostStates[hostId] = state
@@ -346,6 +521,23 @@ final class RemoteSessionMonitor: ObservableObject {
             ))
             threads[index].updatedAt = Date()
             threads[index].lastActivity = Date()
+
+        case .threadError(let hostId, let threadId, let turnId, let message, let willRetry):
+            guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
+            threads[index].history.append(ChatHistoryItem(
+                id: "remote-error-\(turnId ?? UUID().uuidString)-\(Date().timeIntervalSince1970)",
+                type: .assistant(message),
+                timestamp: Date()
+            ))
+            threads[index].lastActivity = Date()
+            threads[index].updatedAt = Date()
+            if !willRetry {
+                threads[index].activeTurnId = nil
+                threads[index].canSteerTurn = false
+                threads[index].pendingApproval = nil
+                threads[index].phase = .idle
+            }
+            updateDerivedFields(at: index)
         }
     }
 
@@ -501,6 +693,58 @@ final class RemoteSessionMonitor: ObservableObject {
         updateDerivedFields(at: threadIndex)
     }
 
+    func appendOptimisticUserMessage(thread: RemoteThreadState, text: String) {
+        guard let index = threadIndex(hostId: thread.hostId, threadId: thread.threadId) else { return }
+        let item = ChatHistoryItem(
+            id: "optimistic-user-\(UUID().uuidString)",
+            type: .user(text),
+            timestamp: Date()
+        )
+        threads[index].history.append(item)
+        threads[index].lastActivity = Date()
+        threads[index].updatedAt = Date()
+        if threads[index].phase == .idle || threads[index].phase == .waitingForInput {
+            threads[index].phase = .processing
+        }
+        updateDerivedFields(at: index)
+    }
+
+    func recoverNewThread(hostId: String, excluding existingIds: Set<String>) -> RemoteThreadState? {
+        let newThreads = threads
+            .filter { $0.hostId == hostId && !existingIds.contains($0.threadId) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        return newThreads.first
+    }
+
+    private func logMonitorEvent(
+        level: RemoteDiagnosticsRecord.Level,
+        hostId: String,
+        method: String? = nil,
+        threadId: String? = nil,
+        turnId: String? = nil,
+        itemId: String? = nil,
+        message: String,
+        payload: String? = nil
+    ) async {
+        let host = hosts.first(where: { $0.id == hostId })
+        await diagnosticsLogger.log(
+            RemoteDiagnosticsRecord(
+                level: level,
+                category: "remote.monitor",
+                hostId: hostId,
+                hostName: host?.displayName,
+                sshTarget: host?.sshTarget,
+                requestId: nil,
+                method: method,
+                threadId: threadId,
+                turnId: turnId,
+                itemId: itemId,
+                message: message,
+                payload: payload
+            )
+        )
+    }
+
     private func historyItems(from turns: [RemoteAppServerTurn]) -> [ChatHistoryItem] {
         var items: [ChatHistoryItem] = []
         let baseDate = Date()
@@ -653,28 +897,36 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 }
 
-actor RemoteAppServerConnection {
+actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
+    private struct PendingRequestMetadata: Sendable {
+        let method: String
+        let threadId: String?
+        let turnId: String?
+        let itemId: String?
+    }
+
     private var host: RemoteHostConfig
     private let emit: @Sendable (RemoteConnectionEvent) async -> Void
+    private let dependencies: RemoteAppServerConnectionDependencies
+    private let connectionId = UUID().uuidString
 
-    private var process: Process?
-    private var stdinHandle: FileHandle?
-    private var stdoutTask: Task<Void, Never>?
-    private var stderrTask: Task<Void, Never>?
+    private var transport: (any RemoteAppServerTransport)?
     private var refreshTask: Task<Void, Never>?
     private var remoteHomeDirectory: String?
     private var nextRequestId: Int = 1
     private var pendingRequests: [Int: CheckedContinuation<AnyCodable?, Error>] = [:]
+    private var pendingRequestMetadata: [Int: PendingRequestMetadata] = [:]
     private var latestStderr: String = ""
-    private let requestTimeoutNs: UInt64 = 10_000_000_000
     private var isStopping = false
 
     init(
         host: RemoteHostConfig,
-        emit: @escaping @Sendable (RemoteConnectionEvent) async -> Void
+        emit: @escaping @Sendable (RemoteConnectionEvent) async -> Void,
+        dependencies: RemoteAppServerConnectionDependencies = .live
     ) {
         self.host = host
         self.emit = emit
+        self.dependencies = dependencies
     }
 
     func updateHost(_ host: RemoteHostConfig) async {
@@ -682,99 +934,106 @@ actor RemoteAppServerConnection {
         self.host = host
         if shouldRestart {
             remoteHomeDirectory = nil
-        }
-        if shouldRestart {
+            await log(
+                level: .info,
+                category: "remote.connection.lifecycle",
+                message: "Remote host config changed; restarting connection"
+            )
             await stop()
             await start()
         }
     }
 
     func start() async {
-        guard process == nil else { return }
+        guard transport == nil else { return }
         isStopping = false
         guard host.isValid else {
             await emit(.connectionState(hostId: host.id, state: .failed("SSH target required")))
+            await log(
+                level: .error,
+                category: "remote.connection.lifecycle",
+                message: "Remote host start aborted: missing SSH target"
+            )
             return
         }
 
         await emit(.connectionState(hostId: host.id, state: .connecting))
+        await log(
+            level: .info,
+            category: "remote.connection.lifecycle",
+            message: "Starting SSH stdio transport"
+        )
 
-        let process = Process()
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = [
-            "-T",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5",
-            host.sshTarget,
-            "codex", "app-server", "--listen", "stdio://"
-        ]
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.terminationHandler = { [weak process] terminatedProcess in
-            let status = terminatedProcess.terminationStatus
-            Task {
-                await self.handleTermination(exitCode: status)
-            }
-            _ = process
-        }
+        let transport = dependencies.transportFactory(host)
+        self.transport = transport
 
         do {
-            try process.run()
-        } catch {
-            await emit(.connectionState(hostId: host.id, state: .failed(error.localizedDescription)))
-            return
-        }
+            try await transport.start(
+                onStdoutLine: { [weak self] line in
+                    await self?.handleLine(line)
+                },
+                onStderrLine: { [weak self] line in
+                    await self?.handleStderr(line)
+                },
+                onTermination: { [weak self] exitCode in
+                    await self?.handleTermination(exitCode: exitCode)
+                }
+            )
+            await log(
+                level: .info,
+                category: "remote.connection.lifecycle",
+                message: "SSH stdio transport started"
+            )
 
-        self.process = process
-        self.stdinHandle = stdinPipe.fileHandleForWriting
-        startReaders(stdout: stdoutPipe.fileHandleForReading, stderr: stderrPipe.fileHandleForReading)
-
-        do {
             try await initialize()
             await emit(.connectionState(hostId: host.id, state: .connected))
+            await log(
+                level: .info,
+                category: "remote.connection.lifecycle",
+                message: "Remote app-server initialized"
+            )
             startRefreshLoop()
         } catch {
+            self.transport = nil
             await emit(.connectionState(hostId: host.id, state: .failed(error.localizedDescription)))
+            await log(
+                level: .error,
+                category: "remote.connection.lifecycle",
+                message: "Remote connection start failed",
+                payload: error.localizedDescription
+            )
             await stop()
         }
     }
 
     func stop() async {
+        guard !isStopping || transport != nil || !pendingRequests.isEmpty else { return }
         isStopping = true
         refreshTask?.cancel()
-        stdoutTask?.cancel()
-        stderrTask?.cancel()
         refreshTask = nil
-        stdoutTask = nil
-        stderrTask = nil
 
-        stdinHandle?.closeFile()
-        stdinHandle = nil
+        await log(
+            level: .info,
+            category: "remote.connection.lifecycle",
+            message: "Stopping remote connection"
+        )
 
-        if let process {
-            if process.isRunning {
-                process.terminate()
-            }
-            self.process = nil
+        if let transport {
+            await transport.stop()
+            self.transport = nil
         }
 
         for (_, continuation) in pendingRequests {
             continuation.resume(throwing: RemoteSessionError.transport("Remote connection closed"))
         }
         pendingRequests.removeAll()
+        pendingRequestMetadata.removeAll()
+        latestStderr = ""
     }
 
     func startThread(defaultCwd: String) async throws -> RemoteAppServerThread {
         let normalizedCwd = try await normalizeRemoteCwd(defaultCwd)
-        let params: [String: Any] = normalizedCwd?.isEmpty != false
-            ? [:]
-            : ["cwd": normalizedCwd!]
-
+        let params: [String: Any] = normalizedCwd?.isEmpty != false ? [:] : ["cwd": normalizedCwd!]
         let result = try await request(method: "thread/start", params: params)
         let response = try remoteDecodeValue(result ?? AnyCodable([:]), as: RemoteAppServerThreadStartResponse.self)
         return response.thread
@@ -818,9 +1077,7 @@ actor RemoteAppServerConnection {
     func respond(to approval: RemotePendingApproval, allow: Bool) async throws {
         let result: [String: Any]
         switch approval.kind {
-        case .commandExecution:
-            result = ["decision": allow ? "accept" : "decline"]
-        case .fileChange:
+        case .commandExecution, .fileChange:
             result = ["decision": allow ? "accept" : "decline"]
         case .permissions:
             let permissions = allow ? permissionGrantPayload(from: approval.requestedPermissions) : [:]
@@ -830,8 +1087,14 @@ actor RemoteAppServerConnection {
         try await sendResponse(id: approval.requestId, result: result)
     }
 
+    func refreshThreads() async throws {
+        let result = try await request(method: "thread/list", params: ["limit": 100])
+        let response = try remoteDecodeValue(result ?? AnyCodable([:]), as: RemoteAppServerThreadListResponse.self)
+        await emit(.threadList(hostId: host.id, threads: response.data))
+    }
+
     private func initialize() async throws {
-        let result = try await request(
+        _ = try await request(
             method: "initialize",
             params: [
                 "clientInfo": [
@@ -841,54 +1104,69 @@ actor RemoteAppServerConnection {
                 ]
             ]
         )
-
-        _ = result
         try await sendNotification(method: "initialized", params: nil)
     }
 
-    func refreshThreads() async throws {
-        let result = try await request(method: "thread/list", params: ["limit": 100])
-        let response = try remoteDecodeValue(result ?? AnyCodable([:]), as: RemoteAppServerThreadListResponse.self)
-        await emit(.threadList(hostId: host.id, threads: response.data))
-    }
-
-    private func startReaders(stdout: FileHandle, stderr: FileHandle) {
-        stdoutTask = Task {
-            do {
-                for try await line in stdout.bytes.lines {
-                    await self.handleLine(String(line))
-                }
-            } catch {
-                let isStopping = await self.isStopping
-                if error is CancellationError || isStopping {
+    private func startRefreshLoop() {
+        refreshTask?.cancel()
+        refreshTask = Task {
+            await self.refreshThreadsInBackground(reason: "initial")
+            while !Task.isCancelled {
+                do {
+                    try await self.dependencies.sleep(self.dependencies.refreshInterval)
+                } catch {
                     return
                 }
-                await self.emit(.connectionState(hostId: self.host.id, state: .failed(error.localizedDescription)))
-            }
-        }
-
-        stderrTask = Task {
-            do {
-                for try await line in stderr.bytes.lines {
-                    await self.handleStderr(String(line))
-                }
-            } catch {
-                return
+                guard !Task.isCancelled else { return }
+                await self.refreshThreadsInBackground(reason: "periodic")
             }
         }
     }
 
-    private func startRefreshLoop() {
-        refreshTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
-                guard !Task.isCancelled else { return }
-                try? await self.refreshThreads()
-            }
+    func refreshThreadsInBackground(reason: String) async {
+        do {
+            try await refreshThreads()
+            await log(
+                level: .debug,
+                category: "remote.connection.refresh",
+                method: "thread/list",
+                message: "Background thread refresh succeeded",
+                payload: reason
+            )
+        } catch {
+            await log(
+                level: .warning,
+                category: "remote.connection.refresh",
+                method: "thread/list",
+                message: "Background thread refresh failed",
+                payload: "\(reason): \(error.localizedDescription)"
+            )
         }
+    }
+
+    func installTransportForTesting(_ transport: any RemoteAppServerTransport) async throws {
+        self.transport = transport
+        try await transport.start(
+            onStdoutLine: { [weak self] line in
+                await self?.handleLine(line)
+            },
+            onStderrLine: { [weak self] line in
+                await self?.handleStderr(line)
+            },
+            onTermination: { [weak self] exitCode in
+                await self?.handleTermination(exitCode: exitCode)
+            }
+        )
     }
 
     private func handleLine(_ line: String) async {
+        await log(
+            level: .debug,
+            category: "remote.rpc.inbound",
+            message: "Received app-server line",
+            payload: line
+        )
+
         guard let data = line.data(using: .utf8) else { return }
         let decoder = JSONDecoder()
 
@@ -903,14 +1181,44 @@ actor RemoteAppServerConnection {
                 return
             }
 
-            if case .int(let id)? = message.id, let continuation = pendingRequests.removeValue(forKey: id) {
+            if case .int(let id)? = message.id,
+               let continuation = pendingRequests.removeValue(forKey: id) {
+                let metadata = pendingRequestMetadata.removeValue(forKey: id)
                 if let error = message.error {
+                    await log(
+                        level: .error,
+                        category: "remote.rpc.response",
+                        requestId: String(id),
+                        method: metadata?.method,
+                        threadId: metadata?.threadId,
+                        turnId: metadata?.turnId,
+                        itemId: metadata?.itemId,
+                        message: "Received RPC error response",
+                        payload: error.message
+                    )
                     continuation.resume(throwing: error)
                 } else {
+                    await log(
+                        level: .debug,
+                        category: "remote.rpc.response",
+                        requestId: String(id),
+                        method: metadata?.method,
+                        threadId: metadata?.threadId,
+                        turnId: metadata?.turnId,
+                        itemId: metadata?.itemId,
+                        message: "Received RPC response",
+                        payload: payloadString(from: message.result)
+                    )
                     continuation.resume(returning: message.result)
                 }
             }
         } catch {
+            await log(
+                level: .error,
+                category: "remote.rpc.decode",
+                message: "Failed to decode app-server message",
+                payload: line
+            )
             await emit(.connectionState(hostId: host.id, state: .failed("Failed to decode app-server message")))
         }
     }
@@ -947,11 +1255,56 @@ actor RemoteAppServerConnection {
                     itemId: payload.itemId,
                     delta: payload.delta
                 ))
+            case "error":
+                let payload = try remoteDecodeValue(params, as: RemoteAppServerErrorNotification.self)
+                let message = payload.error.additionalDetails.map { "\(payload.error.message)\n\($0)" } ?? payload.error.message
+                await log(
+                    level: .error,
+                    category: "remote.rpc.notification",
+                    method: method,
+                    threadId: payload.threadId,
+                    turnId: payload.turnId,
+                    message: "Received thread error notification",
+                    payload: message,
+                    willRetry: payload.willRetry
+                )
+                await emit(.threadError(
+                    hostId: host.id,
+                    threadId: payload.threadId,
+                    turnId: payload.turnId,
+                    message: message,
+                    willRetry: payload.willRetry
+                ))
+            case "codex/event/error":
+                let payload = try remoteDecodeValue(params, as: RemoteAppServerCodexEventErrorNotification.self)
+                let message = payload.msg.additionalDetails.map { "\(payload.msg.message)\n\($0)" } ?? payload.msg.message
+                await log(
+                    level: .error,
+                    category: "remote.rpc.notification",
+                    method: method,
+                    threadId: payload.conversationId,
+                    turnId: payload.id.isEmpty ? nil : payload.id,
+                    message: "Received codex event error notification",
+                    payload: message
+                )
+                await emit(.threadError(
+                    hostId: host.id,
+                    threadId: payload.conversationId,
+                    turnId: payload.id.isEmpty ? nil : payload.id,
+                    message: message,
+                    willRetry: false
+                ))
             default:
                 break
             }
         } catch {
-            return
+            await log(
+                level: .warning,
+                category: "remote.rpc.notification",
+                method: method,
+                message: "Failed to decode notification",
+                payload: payloadString(from: params)
+            )
         }
     }
 
@@ -1011,18 +1364,39 @@ actor RemoteAppServerConnection {
                 try await sendResponse(id: id, result: [:])
             }
         } catch {
-            return
+            await log(
+                level: .warning,
+                category: "remote.rpc.server_request",
+                requestId: rpcIDString(id),
+                method: method,
+                message: "Failed to handle server request",
+                payload: error.localizedDescription
+            )
         }
     }
 
     private func handleStderr(_ line: String) async {
         latestStderr = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        await log(
+            level: .warning,
+            category: "remote.connection.stderr",
+            message: "Received stderr from SSH/app-server",
+            stderr: latestStderr
+        )
     }
 
     private func handleTermination(exitCode: Int32) async {
         if isStopping {
+            await log(
+                level: .info,
+                category: "remote.connection.lifecycle",
+                message: "Remote process terminated after local stop",
+                exitCode: exitCode,
+                stderr: latestStderr
+            )
             return
         }
+
         let message: String
         if latestStderr.isEmpty {
             message = exitCode == 0 ? "Disconnected" : "SSH exited with code \(exitCode)"
@@ -1030,6 +1404,13 @@ actor RemoteAppServerConnection {
             message = latestStderr
         }
 
+        await log(
+            level: exitCode == 0 ? .warning : .error,
+            category: "remote.connection.lifecycle",
+            message: "Remote transport terminated unexpectedly",
+            exitCode: exitCode,
+            stderr: latestStderr
+        )
         await emit(.connectionState(hostId: host.id, state: .failed(message)))
         await stop()
     }
@@ -1037,6 +1418,7 @@ actor RemoteAppServerConnection {
     private func request(method: String, params: [String: Any]) async throws -> AnyCodable? {
         let id = nextRequestId
         nextRequestId += 1
+
         let envelope = RemoteAppServerEnvelope(
             method: method,
             id: .int(id),
@@ -1044,17 +1426,39 @@ actor RemoteAppServerConnection {
             result: nil,
             error: nil
         )
+        let metadata = PendingRequestMetadata(
+            method: method,
+            threadId: stringValue(forKey: "threadId", in: params),
+            turnId: stringValue(forKey: "turnId", in: params) ?? stringValue(forKey: "expectedTurnId", in: params),
+            itemId: stringValue(forKey: "itemId", in: params)
+        )
 
-        try await sendEnvelope(envelope)
+        let payload = try await sendEnvelope(envelope)
+        await log(
+            level: .debug,
+            category: "remote.rpc.request",
+            requestId: String(id),
+            method: method,
+            threadId: metadata.threadId,
+            turnId: metadata.turnId,
+            itemId: metadata.itemId,
+            message: "Sent RPC request",
+            payload: payload
+        )
 
-        let timeoutMessage = "Timed out waiting for app-server response to \(method)"
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[id] = continuation
+            pendingRequestMetadata[id] = metadata
+
             Task {
-                try? await Task.sleep(nanoseconds: requestTimeoutNs)
+                do {
+                    try await self.dependencies.sleep(self.dependencies.requestTimeout)
+                } catch {
+                    return
+                }
                 await self.failPendingRequest(
                     id: id,
-                    error: RemoteSessionError.timeout(timeoutMessage)
+                    error: RemoteSessionError.timeout("Timed out waiting for app-server response to \(method)")
                 )
             }
         }
@@ -1068,7 +1472,14 @@ actor RemoteAppServerConnection {
             result: nil,
             error: nil
         )
-        try await sendEnvelope(envelope)
+        let payload = try await sendEnvelope(envelope)
+        await log(
+            level: .debug,
+            category: "remote.rpc.notification",
+            method: method,
+            message: "Sent RPC notification",
+            payload: payload
+        )
     }
 
     private func sendResponse(id: RemoteRPCID, result: [String: Any]) async throws {
@@ -1079,21 +1490,43 @@ actor RemoteAppServerConnection {
             result: AnyCodable(result),
             error: nil
         )
-        try await sendEnvelope(envelope)
+        let payload = try await sendEnvelope(envelope)
+        await log(
+            level: .debug,
+            category: "remote.rpc.response",
+            requestId: rpcIDString(id),
+            message: "Sent RPC response",
+            payload: payload
+        )
     }
 
-    private func sendEnvelope(_ envelope: RemoteAppServerEnvelope) async throws {
-        guard let stdinHandle else {
+    private func sendEnvelope(_ envelope: RemoteAppServerEnvelope) async throws -> String {
+        guard let transport else {
             throw RemoteSessionError.notConnected
         }
-
         let data = try JSONEncoder().encode(envelope)
-        stdinHandle.write(data)
-        stdinHandle.write(Data([0x0A]))
+        guard let line = String(data: data, encoding: .utf8) else {
+            throw RemoteSessionError.transport("Failed to encode app-server message")
+        }
+        try await transport.send(line: line)
+        return line
     }
 
-    private func failPendingRequest(id: Int, error: Error) {
+    private func failPendingRequest(id: Int, error: Error) async {
         guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
+        let metadata = pendingRequestMetadata.removeValue(forKey: id)
+        let level: RemoteDiagnosticsRecord.Level = error is RemoteSessionError ? .warning : .error
+        await log(
+            level: level,
+            category: "remote.rpc.request",
+            requestId: String(id),
+            method: metadata?.method,
+            threadId: metadata?.threadId,
+            turnId: metadata?.turnId,
+            itemId: metadata?.itemId,
+            message: "Request finished with error",
+            payload: error.localizedDescription
+        )
         continuation.resume(throwing: error)
     }
 
@@ -1120,6 +1553,11 @@ actor RemoteAppServerConnection {
         guard !trimmed.isEmpty else { return nil }
 
         if trimmed == "~" {
+            await log(
+                level: .debug,
+                category: "remote.connection.cwd",
+                message: "Default CWD '~' resolved to nil payload"
+            )
             return nil
         }
 
@@ -1128,7 +1566,14 @@ actor RemoteAppServerConnection {
                 throw RemoteSessionError.invalidConfiguration("Could not resolve remote home directory for `~`")
             }
             let suffix = String(trimmed.dropFirst(2))
-            return URL(fileURLWithPath: home).appendingPathComponent(suffix).path
+            let resolved = URL(fileURLWithPath: home).appendingPathComponent(suffix).path
+            await log(
+                level: .debug,
+                category: "remote.connection.cwd",
+                message: "Resolved remote home directory",
+                payload: "\(trimmed) -> \(resolved)"
+            )
+            return resolved
         }
 
         return trimmed
@@ -1139,15 +1584,88 @@ actor RemoteAppServerConnection {
             return remoteHomeDirectory
         }
 
-        let output = try await ProcessExecutor.shared.run("/usr/bin/ssh", arguments: [
-            "-T",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5",
-            host.sshTarget,
-            "printf '%s' \"$HOME\""
-        ])
-        let home = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        remoteHomeDirectory = home.isEmpty ? nil : home
-        return remoteHomeDirectory
+        do {
+            let output = try await dependencies.processExecutor.run("/usr/bin/ssh", arguments: [
+                "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                host.sshTarget,
+                "printf '%s' \"$HOME\""
+            ])
+            let home = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            remoteHomeDirectory = home.isEmpty ? nil : home
+            await log(
+                level: .debug,
+                category: "remote.connection.cwd",
+                message: "Resolved remote $HOME",
+                payload: remoteHomeDirectory
+            )
+            return remoteHomeDirectory
+        } catch {
+            await log(
+                level: .error,
+                category: "remote.connection.cwd",
+                message: "Failed to resolve remote $HOME",
+                payload: error.localizedDescription
+            )
+            throw error
+        }
+    }
+
+    private func stringValue(forKey key: String, in params: [String: Any]) -> String? {
+        params[key] as? String
+    }
+
+    private func payloadString(from value: AnyCodable?) -> String? {
+        guard let value else { return nil }
+        guard let data = try? JSONEncoder().encode(value) else {
+            return String(describing: value.value)
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func rpcIDString(_ id: RemoteRPCID) -> String {
+        switch id {
+        case .int(let value):
+            return String(value)
+        case .string(let value):
+            return value
+        }
+    }
+
+    private func log(
+        level: RemoteDiagnosticsRecord.Level,
+        category: String,
+        requestId: String? = nil,
+        method: String? = nil,
+        threadId: String? = nil,
+        turnId: String? = nil,
+        itemId: String? = nil,
+        message: String,
+        payload: String? = nil,
+        exitCode: Int32? = nil,
+        stderr: String? = nil,
+        willRetry: Bool? = nil
+    ) async {
+        await dependencies.diagnosticsLogger.log(
+            RemoteDiagnosticsRecord(
+                level: level,
+                category: category,
+                hostId: host.id,
+                hostName: host.displayName,
+                sshTarget: host.sshTarget,
+                connectionId: connectionId,
+                requestId: requestId,
+                method: method,
+                threadId: threadId,
+                turnId: turnId,
+                itemId: itemId,
+                message: message,
+                payload: payload,
+                exitCode: exitCode,
+                stderr: stderr,
+                willRetry: willRetry
+            )
+        )
     }
 }
