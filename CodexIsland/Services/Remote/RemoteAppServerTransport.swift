@@ -52,7 +52,7 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         process.terminationHandler = { terminatedProcess in
-            Task {
+            Task.detached {
                 await onTermination(terminatedProcess.terminationStatus)
             }
         }
@@ -102,7 +102,7 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
         onStdoutLine: @escaping @Sendable (String) async -> Void,
         onStderrLine: @escaping @Sendable (String) async -> Void
     ) {
-        stdoutTask = Task {
+        stdoutTask = Task.detached {
             do {
                 for try await line in stdout.bytes.lines {
                     await onStdoutLine(String(line))
@@ -112,7 +112,7 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
             }
         }
 
-        stderrTask = Task {
+        stderrTask = Task.detached {
             do {
                 for try await line in stderr.bytes.lines {
                     await onStderrLine(String(line))
