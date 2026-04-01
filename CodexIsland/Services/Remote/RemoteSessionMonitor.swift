@@ -26,6 +26,7 @@ enum RemoteSessionError: LocalizedError {
     case missingThread
     case invalidConfiguration(String)
     case transport(String)
+    case timeout(String)
 
     var errorDescription: String? {
         switch self {
@@ -33,7 +34,7 @@ enum RemoteSessionError: LocalizedError {
             return "Remote host is not connected"
         case .missingThread:
             return "Remote thread not found"
-        case .invalidConfiguration(let message), .transport(let message):
+        case .invalidConfiguration(let message), .transport(let message), .timeout(let message):
             return message
         }
     }
@@ -610,6 +611,7 @@ actor RemoteAppServerConnection {
     private var nextRequestId: Int = 1
     private var pendingRequests: [Int: CheckedContinuation<AnyCodable?, Error>] = [:]
     private var latestStderr: String = ""
+    private let requestTimeoutNs: UInt64 = 10_000_000_000
 
     init(
         host: RemoteHostConfig,
@@ -981,8 +983,16 @@ actor RemoteAppServerConnection {
 
         try await sendEnvelope(envelope)
 
+        let timeoutMessage = "Timed out waiting for app-server response to \(method)"
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[id] = continuation
+            Task {
+                try? await Task.sleep(nanoseconds: requestTimeoutNs)
+                await self.failPendingRequest(
+                    id: id,
+                    error: RemoteSessionError.timeout(timeoutMessage)
+                )
+            }
         }
     }
 
@@ -1018,6 +1028,11 @@ actor RemoteAppServerConnection {
         stdinHandle.write(Data([0x0A]))
     }
 
+    private func failPendingRequest(id: Int, error: Error) {
+        guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: error)
+    }
+
     private func permissionGrantPayload(from profile: RemotePermissionProfile) -> [String: Any] {
         var payload: [String: Any] = [:]
         if let networkEnabled = profile.networkEnabled {
@@ -1041,7 +1056,7 @@ actor RemoteAppServerConnection {
         guard !trimmed.isEmpty else { return nil }
 
         if trimmed == "~" {
-            return try await resolveRemoteHomeDirectory() ?? nil
+            return nil
         }
 
         if trimmed.hasPrefix("~/") {
