@@ -546,8 +546,13 @@ struct ChatView: View {
         )
 
         history = ChatHistoryManager.shared.history(for: logicalSessionId)
+        let hasResolvedInitialState =
+            ChatHistoryManager.shared.isLoaded(logicalSessionId: logicalSessionId, sessionId: session.sessionId) ||
+            !history.isEmpty ||
+            session.transcriptPath != nil
+
         withAnimation(.easeOut(duration: 0.2)) {
-            isLoading = false
+            isLoading = !hasResolvedInitialState
         }
     }
 

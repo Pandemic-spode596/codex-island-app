@@ -51,6 +51,9 @@ class ChatHistoryManager: ObservableObject {
 
         await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
         guard let session = await SessionStore.shared.session(for: sessionId) else { return }
+        let filteredItems = filterOutSubagentTools(session.chatItems)
+        histories[logicalSessionId] = filteredItems
+        agentDescriptions[logicalSessionId] = session.subagentState.agentDescriptions
         guard session.transcriptPath != nil || !session.chatItems.isEmpty else { return }
         loadedSessions[logicalSessionId] = sessionId
     }
