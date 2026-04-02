@@ -37,7 +37,8 @@ struct NotchView: View {
 
     /// Whether any session has a pending permission request
     private var hasPendingPermission: Bool {
-        allPhases.contains { $0.isWaitingForApproval }
+        sessionMonitor.instances.contains { $0.primaryPendingInteraction?.isApproval == true } ||
+        remoteSessionMonitor.threads.contains { $0.primaryPendingInteraction?.isApproval == true }
     }
 
     /// Whether any session is waiting for user input (done/ready state) within the display window

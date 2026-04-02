@@ -35,8 +35,8 @@ struct RemoteChatView: View {
         thread.history
     }
 
-    private var approvalTool: String? {
-        thread.approvalToolName
+    private var pendingInteraction: PendingInteraction? {
+        thread.primaryPendingInteraction
     }
 
     var body: some View {
@@ -49,13 +49,20 @@ struct RemoteChatView: View {
                 messageList
             }
 
-            if let tool = approvalTool {
-                ChatApprovalBar(
-                    tool: tool,
-                    toolInput: thread.pendingToolInput,
-                    onApprove: { approve() },
-                    onDeny: { deny() }
+            if let pendingInteraction {
+                PendingInteractionBar(
+                    interaction: pendingInteraction,
+                    canRespondInline: true,
+                    canOpenTerminal: false,
+                    onApprovalAction: { action in
+                        respondToApproval(action)
+                    },
+                    onSubmitAnswers: { answers in
+                        respondToQuestions(answers)
+                    },
+                    onOpenTerminal: {}
                 )
+                .id(pendingInteraction.id)
             } else {
                 inputBar
             }
@@ -295,6 +302,19 @@ struct RemoteChatView: View {
     private func deny() {
         Task {
             try? await remoteSessionMonitor.deny(thread: thread)
+        }
+    }
+
+    private func respondToApproval(_ action: PendingApprovalAction) {
+        Task {
+            try? await remoteSessionMonitor.respond(thread: thread, action: action)
+        }
+    }
+
+    private func respondToQuestions(_ answers: PendingInteractionAnswerPayload) {
+        guard case .userInput(let interaction)? = pendingInteraction else { return }
+        Task {
+            try? await remoteSessionMonitor.respond(thread: thread, interaction: interaction, answers: answers)
         }
     }
 }

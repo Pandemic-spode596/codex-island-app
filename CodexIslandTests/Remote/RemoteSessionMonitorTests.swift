@@ -83,7 +83,8 @@ final class RemoteSessionMonitorTests: XCTestCase {
             turnId: "turn-1",
             title: "Command Execution",
             detail: "pwd",
-            requestedPermissions: .none
+            requestedPermissions: .none,
+            availableActions: [.allow, .cancel]
         )
 
         let monitor = RemoteSessionMonitor(
@@ -105,6 +106,89 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertEqual(updated.pendingApproval?.id, "approval-1")
         XCTAssertEqual(updated.phase.approvalToolName, "Command Execution")
         XCTAssertEqual(updated.pendingToolInput, "pwd")
+    }
+
+    func testUserInputRequestSetsPendingInteractionState() throws {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
+        let interaction = PendingUserInputInteraction(
+            id: "item-1",
+            title: "Codex needs your input",
+            questions: [
+                PendingInteractionQuestion(
+                    id: "scope",
+                    header: "Scope",
+                    question: "Choose one",
+                    options: [PendingInteractionOption(label: "One", description: nil)],
+                    isOther: false,
+                    isSecret: false
+                )
+            ],
+            transport: .remoteAppServer(requestId: .int(7))
+        )
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
+        monitor.apply(event: .userInputRequest(hostId: host.id, threadId: "thread-1", interaction: interaction))
+
+        let updated = try XCTUnwrap(monitor.threads.first)
+        XCTAssertEqual(updated.pendingInteractions.count, 1)
+        XCTAssertEqual(updated.primaryPendingInteraction?.id, "item-1")
+        XCTAssertTrue(updated.needsAttention)
+    }
+
+    func testServerRequestResolvedClearsPendingInteractionState() throws {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
+        let interaction = PendingUserInputInteraction(
+            id: "item-1",
+            title: "Codex needs your input",
+            questions: [
+                PendingInteractionQuestion(
+                    id: "scope",
+                    header: "Scope",
+                    question: "Choose one",
+                    options: [PendingInteractionOption(label: "One", description: nil)],
+                    isOther: false,
+                    isSecret: false
+                )
+            ],
+            transport: .remoteAppServer(requestId: .int(7))
+        )
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
+        monitor.apply(event: .userInputRequest(hostId: host.id, threadId: "thread-1", interaction: interaction))
+        monitor.apply(event: .serverRequestResolved(hostId: host.id, threadId: "thread-1", requestId: .int(7)))
+
+        let updated = try XCTUnwrap(monitor.threads.first)
+        XCTAssertTrue(updated.pendingInteractions.isEmpty)
     }
 
     func testThreadListCollapsesSameSSHAndCwdToLatestThread() {

@@ -446,6 +446,11 @@ nonisolated struct RemoteAppServerAgentMessageDeltaNotification: Codable, Sendab
     let delta: String
 }
 
+nonisolated struct RemoteAppServerServerRequestResolvedNotification: Codable, Sendable {
+    let threadId: String
+    let requestId: RemoteRPCID
+}
+
 nonisolated struct RemoteAppServerCommandApprovalRequest: Codable, Sendable {
     let threadId: String
     let turnId: String

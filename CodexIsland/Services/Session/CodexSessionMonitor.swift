@@ -113,6 +113,58 @@ class CodexSessionMonitor: ObservableObject {
         }
     }
 
+    func respond(sessionId: String, action: PendingApprovalAction) {
+        Task {
+            guard let session = await SessionStore.shared.session(for: sessionId),
+                  let interaction = session.primaryPendingInteraction else {
+                return
+            }
+
+            switch interaction {
+            case .approval(let approval):
+                switch approval.transport {
+                case .hookPermission(let toolUseId):
+                    let decision = action == .allow ? "allow" : "deny"
+                    HookSocketServer.shared.respondToPermission(toolUseId: toolUseId, decision: decision)
+                    if action == .allow {
+                        await SessionStore.shared.process(
+                            .permissionApproved(sessionId: sessionId, toolUseId: toolUseId)
+                        )
+                    } else {
+                        await SessionStore.shared.process(
+                            .permissionDenied(sessionId: sessionId, toolUseId: toolUseId, reason: nil)
+                        )
+                    }
+                case .codexLocal:
+                    guard let steps = localApprovalSteps(for: approval, action: action),
+                          await NativeTerminalInputSender.shared.send(steps: steps, to: session) else {
+                        return
+                    }
+                    await refreshSessionAfterInteraction(session)
+                case .remoteAppServer:
+                    break
+                }
+            case .userInput:
+                break
+            }
+        }
+    }
+
+    func respond(sessionId: String, answers: PendingInteractionAnswerPayload) {
+        Task {
+            guard let session = await SessionStore.shared.session(for: sessionId),
+                  case .userInput(let interaction)? = session.primaryPendingInteraction,
+                  interaction.transport.isLocalCodex,
+                  interaction.supportsInlineResponse,
+                  let steps = localUserInputSteps(for: interaction, answers: answers),
+                  await NativeTerminalInputSender.shared.send(steps: steps, to: session) else {
+                return
+            }
+
+            await refreshSessionAfterInteraction(session)
+        }
+    }
+
     /// Archive (remove) a session from the instances list
     func archiveSession(sessionId: String) {
         Task {
@@ -142,9 +194,87 @@ class CodexSessionMonitor: ObservableObject {
             await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
         }
     }
+
+    private func refreshSessionAfterInteraction(_ session: SessionState) async {
+        try? await Task.sleep(for: .milliseconds(250))
+        await SessionStore.shared.process(.loadHistory(sessionId: session.sessionId, cwd: session.cwd))
+    }
+
+    private func localApprovalSteps(
+        for interaction: PendingApprovalInteraction,
+        action: PendingApprovalAction
+    ) -> [TerminalInputStep]? {
+        switch interaction.kind {
+        case .permissions:
+            switch action {
+            case .allow:
+                return [.key("y")]
+            case .allowForSession:
+                return [.key("a")]
+            case .deny:
+                return [.key("n")]
+            case .cancel:
+                return nil
+            }
+        case .commandExecution, .fileChange, .generic:
+            switch action {
+            case .allow:
+                return [.key("y")]
+            case .allowForSession:
+                return interaction.availableActions.contains(.allowForSession) ? [.key("a")] : nil
+            case .deny:
+                if interaction.availableActions.contains(.deny) {
+                    return [.key("d")]
+                }
+                return nil
+            case .cancel:
+                if interaction.availableActions.contains(.cancel) {
+                    return [.key("n")]
+                }
+                return nil
+            }
+        }
+    }
+
+    private func localUserInputSteps(
+        for interaction: PendingUserInputInteraction,
+        answers: PendingInteractionAnswerPayload
+    ) -> [TerminalInputStep]? {
+        var steps: [TerminalInputStep] = []
+
+        for question in interaction.questions {
+            guard let questionAnswers = answers.answers[question.id] else { return nil }
+
+            if question.isChoiceQuestion {
+                guard let selectedLabel = questionAnswers.first,
+                      let optionIndex = question.options.firstIndex(where: { $0.label == selectedLabel }) else {
+                    return nil
+                }
+                steps.append(.key(String(optionIndex + 1)))
+                continue
+            }
+
+            let text = questionAnswers.first ?? ""
+            if !text.isEmpty {
+                steps.append(.text(text))
+            }
+            steps.append(.enter)
+        }
+
+        return steps.isEmpty ? nil : steps
+    }
 }
 
 // MARK: - Interrupt Watcher Delegate
+
+private extension PendingInteractionTransport {
+    var isLocalCodex: Bool {
+        if case .codexLocal = self {
+            return true
+        }
+        return false
+    }
+}
 
 extension CodexSessionMonitor: JSONLInterruptWatcherDelegate {
     nonisolated func didDetectInterrupt(sessionId: String) {

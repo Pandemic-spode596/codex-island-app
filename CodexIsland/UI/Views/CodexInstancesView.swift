@@ -192,15 +192,12 @@ struct InstanceRow: View {
     private let spinnerSymbols = ["·", "✢", "✳", "∗", "✻", "✽"]
     private let spinnerTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
 
-    /// Whether we're showing the approval UI
-    private var isWaitingForApproval: Bool {
-        session.phase.isWaitingForApproval
+    private var pendingInteraction: PendingInteraction? {
+        session.primaryPendingInteraction
     }
 
-    /// Whether the pending tool requires interactive input (not just approve/deny)
-    private var isInteractiveTool: Bool {
-        guard let toolName = session.pendingToolName else { return false }
-        return toolName == "AskUserQuestion"
+    private var hasPendingInteraction: Bool {
+        pendingInteraction != nil
     }
 
     var body: some View {
@@ -223,24 +220,15 @@ struct InstanceRow: View {
                         .lineLimit(1)
                 }
 
-                // Show tool call when waiting for approval, otherwise last activity
-                if isWaitingForApproval, let toolName = session.pendingToolName {
-                    // Show tool name in amber + input on same line
+                if let pendingInteraction {
                     HStack(spacing: 4) {
-                        Text(MCPToolFormatter.formatToolName(toolName))
+                        Text(MCPToolFormatter.formatToolName(pendingInteraction.title))
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundColor(TerminalColors.amber.opacity(0.9))
-                        if isInteractiveTool {
-                            Text("Needs your input")
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        } else if let input = session.pendingToolInput {
-                            Text(input)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        }
+                        Text(pendingInteraction.summaryText)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.5))
+                            .lineLimit(1)
                     }
                 } else if let role = session.lastMessageRole {
                     switch role {
@@ -291,27 +279,19 @@ struct InstanceRow: View {
 
             Spacer(minLength: 0)
 
-            // Action icons or approval buttons
-            if isWaitingForApproval && isInteractiveTool {
-                // Interactive tools like AskUserQuestion - show chat + terminal buttons
+            if hasPendingInteraction {
                 HStack(spacing: 8) {
                     IconButton(icon: "bubble.left") {
                         onChat()
                     }
 
-                    // Go to Terminal button (only if yabai available)
-                    TerminalButton(
-                        isEnabled: session.canAttemptFocusTerminal,
-                        onTap: { onFocus() }
-                    )
+                    if session.canAttemptFocusTerminal {
+                        TerminalButton(
+                            isEnabled: true,
+                            onTap: { onFocus() }
+                        )
+                    }
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            } else if isWaitingForApproval {
-                InlineApprovalButtons(
-                    onChat: onChat,
-                    onApprove: onApprove,
-                    onReject: onReject
-                )
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else {
                 HStack(spacing: 8) {
@@ -348,7 +328,7 @@ struct InstanceRow: View {
         .onTapGesture(count: 2) {
             onChat()
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isWaitingForApproval)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hasPendingInteraction)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
@@ -378,9 +358,15 @@ struct InstanceRow: View {
                 .fill(TerminalColors.green)
                 .frame(width: 6, height: 6)
         case .idle, .ended:
-            Circle()
-                .fill(Color.white.opacity(0.2))
-                .frame(width: 6, height: 6)
+            if hasPendingInteraction {
+                Text("!")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(TerminalColors.amber)
+            } else {
+                Circle()
+                    .fill(Color.white.opacity(0.2))
+                    .frame(width: 6, height: 6)
+            }
         }
     }
 
@@ -400,8 +386,12 @@ struct RemoteInstanceRow: View {
     private let spinnerSymbols = ["·", "✢", "✳", "∗", "✻", "✽"]
     private let spinnerTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
 
-    private var isWaitingForApproval: Bool {
-        thread.phase.isWaitingForApproval
+    private var pendingInteraction: PendingInteraction? {
+        thread.primaryPendingInteraction
+    }
+
+    private var hasPendingInteraction: Bool {
+        pendingInteraction != nil
     }
 
     var body: some View {
@@ -420,17 +410,15 @@ struct RemoteInstanceRow: View {
                     .foregroundColor(.white.opacity(0.3))
                     .lineLimit(1)
 
-                if isWaitingForApproval, let toolName = thread.approvalToolName {
+                if let pendingInteraction {
                     HStack(spacing: 4) {
-                        Text(toolName)
+                        Text(pendingInteraction.title)
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundColor(TerminalColors.amber.opacity(0.9))
-                        if let detail = thread.pendingToolInput {
-                            Text(detail)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        }
+                        Text(pendingInteraction.summaryText)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.5))
+                            .lineLimit(1)
                     }
                 } else if let role = thread.lastMessageRole {
                     switch role {
@@ -478,21 +466,12 @@ struct RemoteInstanceRow: View {
 
             Spacer(minLength: 0)
 
-            if isWaitingForApproval {
-                InlineApprovalButtons(
-                    onChat: onChat,
-                    onApprove: onApprove,
-                    onReject: onReject
-                )
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            } else {
-                HStack(spacing: 8) {
-                    IconButton(icon: "bubble.left") {
-                        onChat()
-                    }
+            HStack(spacing: 8) {
+                IconButton(icon: "bubble.left") {
+                    onChat()
                 }
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
         }
         .padding(.leading, 8)
         .padding(.trailing, 14)
@@ -501,7 +480,7 @@ struct RemoteInstanceRow: View {
         .onTapGesture {
             onChat()
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isWaitingForApproval)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hasPendingInteraction)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
@@ -531,9 +510,15 @@ struct RemoteInstanceRow: View {
                 .fill(TerminalColors.green)
                 .frame(width: 6, height: 6)
         case .idle, .ended:
-            Circle()
-                .fill(thread.connectionState.isConnected ? Color.white.opacity(0.2) : Color.red.opacity(0.7))
-                .frame(width: 6, height: 6)
+            if hasPendingInteraction {
+                Text("!")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(TerminalColors.amber)
+            } else {
+                Circle()
+                    .fill(thread.connectionState.isConnected ? Color.white.opacity(0.2) : Color.red.opacity(0.7))
+                    .frame(width: 6, height: 6)
+            }
         }
     }
 }

@@ -19,6 +19,8 @@ enum RemoteConnectionEvent: Sendable {
     case itemCompleted(hostId: String, threadId: String, turnId: String, item: RemoteAppServerThreadItem)
     case agentMessageDelta(hostId: String, threadId: String, turnId: String, itemId: String, delta: String)
     case approval(hostId: String, threadId: String, approval: RemotePendingApproval)
+    case userInputRequest(hostId: String, threadId: String, interaction: PendingUserInputInteraction)
+    case serverRequestResolved(hostId: String, threadId: String, requestId: RemoteRPCID)
     case threadError(hostId: String, threadId: String, turnId: String?, message: String, willRetry: Bool)
 }
 
@@ -52,6 +54,8 @@ nonisolated protocol RemoteAppServerConnectionProtocol: Sendable {
     func sendMessage(threadId: String, text: String, activeTurnId: String?) async throws
     func interrupt(threadId: String, turnId: String) async throws
     func respond(to approval: RemotePendingApproval, allow: Bool) async throws
+    func respond(to approval: RemotePendingApproval, action: PendingApprovalAction) async throws
+    func respond(to interaction: PendingUserInputInteraction, answers: PendingInteractionAnswerPayload) async throws
     func refreshThreads() async throws
 }
 
@@ -543,23 +547,34 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     func approve(thread: RemoteThreadState) async throws {
-        guard let approval = thread.pendingApproval else { return }
-        guard let connection = connections[thread.hostId] else {
-            throw RemoteSessionError.notConnected
-        }
-
-        try await connection.respond(to: approval, allow: true)
-        clearPendingApproval(hostId: thread.hostId, threadId: thread.threadId, itemId: approval.itemId)
+        try await respond(thread: thread, action: .allow)
     }
 
     func deny(thread: RemoteThreadState) async throws {
+        try await respond(thread: thread, action: .deny)
+    }
+
+    func respond(thread: RemoteThreadState, action: PendingApprovalAction) async throws {
         guard let approval = thread.pendingApproval else { return }
         guard let connection = connections[thread.hostId] else {
             throw RemoteSessionError.notConnected
         }
 
-        try await connection.respond(to: approval, allow: false)
+        try await connection.respond(to: approval, action: action)
         clearPendingApproval(hostId: thread.hostId, threadId: thread.threadId, itemId: approval.itemId)
+    }
+
+    func respond(
+        thread: RemoteThreadState,
+        interaction: PendingUserInputInteraction,
+        answers: PendingInteractionAnswerPayload
+    ) async throws {
+        guard let connection = connections[thread.hostId] else {
+            throw RemoteSessionError.notConnected
+        }
+
+        try await connection.respond(to: interaction, answers: answers)
+        clearPendingInteraction(hostId: thread.hostId, threadId: thread.threadId, interactionId: interaction.id)
     }
 
     private func persistHosts() {
@@ -637,6 +652,7 @@ final class RemoteSessionMonitor: ObservableObject {
             threads[index].activeTurnId = nil
             threads[index].canSteerTurn = false
             threads[index].pendingApproval = nil
+            threads[index].pendingInteractions.removeAll()
             threads[index].phase = phase(from: turn.status)
             threads[index].updatedAt = Date()
             threads[index].lastActivity = Date()
@@ -649,6 +665,7 @@ final class RemoteSessionMonitor: ObservableObject {
             guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
             upsertHistoryItem(item, threadIndex: index, isCompletion: true)
             clearPendingApproval(hostId: hostId, threadId: threadId, itemId: item.id)
+            clearPendingInteraction(hostId: hostId, threadId: threadId, interactionId: item.id)
 
         case .agentMessageDelta(let hostId, let threadId, _, let itemId, let delta):
             guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
@@ -657,6 +674,19 @@ final class RemoteSessionMonitor: ObservableObject {
         case .approval(let hostId, let threadId, let approval):
             guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
             threads[index].pendingApproval = approval
+            upsertPendingInteraction(
+                hostId: hostId,
+                threadId: threadId,
+                interaction: .approval(PendingApprovalInteraction(
+                    id: approval.itemId,
+                    title: approval.title,
+                    kind: approval.pendingKind,
+                    detail: approval.detail,
+                    requestedPermissions: approval.requestedPermissions,
+                    availableActions: approval.availableActions,
+                    transport: .remoteAppServer(requestId: approval.requestId)
+                ))
+            )
             threads[index].phase = .waitingForApproval(PermissionContext(
                 toolUseId: approval.itemId,
                 toolName: approval.title,
@@ -665,6 +695,12 @@ final class RemoteSessionMonitor: ObservableObject {
             ))
             threads[index].updatedAt = Date()
             threads[index].lastActivity = Date()
+
+        case .userInputRequest(let hostId, let threadId, let interaction):
+            upsertPendingInteraction(hostId: hostId, threadId: threadId, interaction: .userInput(interaction))
+
+        case .serverRequestResolved(let hostId, let threadId, let requestId):
+            clearPendingInteraction(hostId: hostId, threadId: threadId, requestId: requestId)
 
         case .threadError(let hostId, let threadId, let turnId, let message, let willRetry):
             guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
@@ -679,6 +715,7 @@ final class RemoteSessionMonitor: ObservableObject {
                 threads[index].activeTurnId = nil
                 threads[index].canSteerTurn = false
                 threads[index].pendingApproval = nil
+                threads[index].pendingInteractions.removeAll()
                 threads[index].phase = .idle
             }
             updateDerivedFields(at: index)
@@ -742,12 +779,14 @@ final class RemoteSessionMonitor: ObservableObject {
                 threads[index].canSteerTurn = computedTurn != nil
                 if isRebindingRawThread {
                     threads[index].pendingApproval = nil
+                    threads[index].pendingInteractions.removeAll()
                 }
             } else if isRebindingRawThread {
                 threads[index].history = []
                 threads[index].activeTurnId = computedTurn?.id
                 threads[index].canSteerTurn = computedTurn != nil
                 threads[index].pendingApproval = nil
+                threads[index].pendingInteractions.removeAll()
             }
 
             updateDerivedFields(at: index)
@@ -780,6 +819,7 @@ final class RemoteSessionMonitor: ObservableObject {
             isLoaded: thread.status != .notLoaded,
             canSteerTurn: computedTurn != nil,
             pendingApproval: nil,
+            pendingInteractions: [],
             connectionState: connectionState
         )
 
@@ -835,11 +875,47 @@ final class RemoteSessionMonitor: ObservableObject {
         guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
         guard threads[index].pendingApproval?.itemId == itemId else { return }
         threads[index].pendingApproval = nil
+        threads[index].pendingInteractions.removeAll { interaction in
+            if case .approval(let approval) = interaction {
+                return approval.id == itemId
+            }
+            return false
+        }
         if threads[index].activeTurnId != nil {
             threads[index].phase = .processing
         } else {
             threads[index].phase = .waitingForInput
         }
+    }
+
+    private func clearPendingInteraction(hostId: String, threadId: String, interactionId: String) {
+        guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
+        threads[index].pendingInteractions.removeAll { $0.id == interactionId }
+        if threads[index].pendingApproval?.itemId == interactionId || threads[index].pendingApproval?.id == interactionId {
+            threads[index].pendingApproval = nil
+        }
+        if threads[index].pendingInteractions.isEmpty {
+            threads[index].phase = threads[index].activeTurnId == nil ? .waitingForInput : .processing
+        }
+    }
+
+    private func clearPendingInteraction(hostId: String, threadId: String, requestId: RemoteRPCID) {
+        guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
+        threads[index].pendingInteractions.removeAll { $0.transport == .remoteAppServer(requestId: requestId) }
+        if threads[index].pendingApproval?.requestId == requestId {
+            threads[index].pendingApproval = nil
+        }
+        if threads[index].pendingInteractions.isEmpty {
+            threads[index].phase = threads[index].activeTurnId == nil ? .waitingForInput : .processing
+        }
+    }
+
+    private func upsertPendingInteraction(hostId: String, threadId: String, interaction: PendingInteraction) {
+        guard let index = threadIndex(hostId: hostId, threadId: threadId) else { return }
+        threads[index].pendingInteractions.removeAll { $0.id == interaction.id }
+        threads[index].pendingInteractions.append(interaction)
+        threads[index].updatedAt = Date()
+        threads[index].lastActivity = Date()
     }
 
     private func upsertHistoryItem(_ item: RemoteAppServerThreadItem, threadIndex: Int, isCompletion: Bool) {
@@ -1271,16 +1347,54 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
     }
 
     func respond(to approval: RemotePendingApproval, allow: Bool) async throws {
+        try await respond(to: approval, action: allow ? .allow : .deny)
+    }
+
+    func respond(to approval: RemotePendingApproval, action: PendingApprovalAction) async throws {
         let result: [String: Any]
         switch approval.kind {
         case .commandExecution, .fileChange:
-            result = ["decision": allow ? "accept" : "decline"]
+            let decision: String
+            switch action {
+            case .allow:
+                decision = "accept"
+            case .allowForSession:
+                decision = "acceptForSession"
+            case .deny:
+                decision = "decline"
+            case .cancel:
+                decision = "cancel"
+            }
+            result = ["decision": decision]
         case .permissions:
-            let permissions = allow ? permissionGrantPayload(from: approval.requestedPermissions) : [:]
-            result = ["scope": "turn", "permissions": permissions]
+            let permissions: [String: Any]
+            let scope: String
+            switch action {
+            case .allow:
+                permissions = permissionGrantPayload(from: approval.requestedPermissions)
+                scope = "turn"
+            case .allowForSession:
+                permissions = permissionGrantPayload(from: approval.requestedPermissions)
+                scope = "session"
+            case .deny, .cancel:
+                permissions = [:]
+                scope = "turn"
+            }
+            result = ["scope": scope, "permissions": permissions]
         }
 
         try await sendResponse(id: approval.requestId, result: result)
+    }
+
+    func respond(to interaction: PendingUserInputInteraction, answers: PendingInteractionAnswerPayload) async throws {
+        var serializedAnswers: [String: Any] = [:]
+        for (questionId, questionAnswers) in answers.answers {
+            serializedAnswers[questionId] = ["answers": questionAnswers]
+        }
+        try await sendResponse(
+            id: interaction.remoteRequestID,
+            result: ["answers": serializedAnswers]
+        )
     }
 
     func refreshThreads() async throws {
@@ -1457,6 +1571,13 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
                     itemId: payload.itemId,
                     delta: payload.delta
                 ))
+            case "serverRequest/resolved":
+                let payload = try remoteDecodeValue(params, as: RemoteAppServerServerRequestResolvedNotification.self)
+                await emit(.serverRequestResolved(
+                    hostId: host.id,
+                    threadId: payload.threadId,
+                    requestId: payload.requestId
+                ))
             case "error":
                 let payload = try remoteDecodeValue(params, as: RemoteAppServerErrorNotification.self)
                 let message = payload.error.additionalDetails.map { "\(payload.error.message)\n\($0)" } ?? payload.error.message
@@ -1516,52 +1637,25 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
         do {
             switch method {
             case "item/commandExecution/requestApproval":
-                let payload = try remoteDecodeValue(params, as: RemoteAppServerCommandApprovalRequest.self)
-                let approval = RemotePendingApproval(
-                    id: "approval-\(host.id)-\(payload.itemId)",
-                    requestId: id,
-                    kind: .commandExecution,
-                    itemId: payload.itemId,
-                    threadId: payload.threadId,
-                    turnId: payload.turnId,
-                    title: "Command Execution",
-                    detail: payload.command ?? payload.reason,
-                    requestedPermissions: .none
-                )
-                await emit(.approval(hostId: host.id, threadId: payload.threadId, approval: approval))
+                guard let approval = parseCommandApproval(requestId: id, params: params.value) else {
+                    throw RemoteSessionError.transport("Failed to parse command approval request")
+                }
+                await emit(.approval(hostId: host.id, threadId: approval.threadId, approval: approval))
             case "item/fileChange/requestApproval":
-                let payload = try remoteDecodeValue(params, as: RemoteAppServerFileChangeApprovalRequest.self)
-                let approval = RemotePendingApproval(
-                    id: "approval-\(host.id)-\(payload.itemId)",
-                    requestId: id,
-                    kind: .fileChange,
-                    itemId: payload.itemId,
-                    threadId: payload.threadId,
-                    turnId: payload.turnId,
-                    title: "File Change",
-                    detail: payload.reason,
-                    requestedPermissions: .none
-                )
-                await emit(.approval(hostId: host.id, threadId: payload.threadId, approval: approval))
+                guard let approval = parseFileApproval(requestId: id, params: params.value) else {
+                    throw RemoteSessionError.transport("Failed to parse file change approval request")
+                }
+                await emit(.approval(hostId: host.id, threadId: approval.threadId, approval: approval))
+            case "item/tool/requestUserInput":
+                guard let interaction = parseUserInputRequest(requestId: id, params: params.value) else {
+                    throw RemoteSessionError.transport("Failed to parse requestUserInput request")
+                }
+                await emit(.userInputRequest(hostId: host.id, threadId: interaction.threadId, interaction: interaction.interaction))
             case "item/permissions/requestApproval":
-                let payload = try remoteDecodeValue(params, as: RemoteAppServerPermissionsApprovalRequest.self)
-                let permissions = RemotePermissionProfile(
-                    networkEnabled: payload.permissions.network?.enabled,
-                    readRoots: payload.permissions.fileSystem?.read ?? [],
-                    writeRoots: payload.permissions.fileSystem?.write ?? []
-                )
-                let approval = RemotePendingApproval(
-                    id: "approval-\(host.id)-\(payload.itemId)",
-                    requestId: id,
-                    kind: .permissions,
-                    itemId: payload.itemId,
-                    threadId: payload.threadId,
-                    turnId: payload.turnId,
-                    title: "Permissions Request",
-                    detail: payload.reason,
-                    requestedPermissions: permissions
-                )
-                await emit(.approval(hostId: host.id, threadId: payload.threadId, approval: approval))
+                guard let approval = parsePermissionsApproval(requestId: id, params: params.value) else {
+                    throw RemoteSessionError.transport("Failed to parse permissions approval request")
+                }
+                await emit(.approval(hostId: host.id, threadId: approval.threadId, approval: approval))
             default:
                 try await sendResponse(id: id, result: [:])
             }
@@ -1575,6 +1669,169 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
                 payload: error.localizedDescription
             )
         }
+    }
+
+    private func parseCommandApproval(requestId: RemoteRPCID, params: Any) -> RemotePendingApproval? {
+        guard let params = params as? [String: Any],
+              let threadId = params["threadId"] as? String,
+              let turnId = params["turnId"] as? String,
+              let itemId = params["itemId"] as? String else {
+            return nil
+        }
+
+        let command = params["command"] as? String
+        let reason = params["reason"] as? String
+        let availableActions = parseCommandApprovalActions(params["availableDecisions"]) ?? [.allow, .cancel]
+
+        return RemotePendingApproval(
+            id: "approval-\(host.id)-\(itemId)",
+            requestId: requestId,
+            kind: .commandExecution,
+            itemId: itemId,
+            threadId: threadId,
+            turnId: turnId,
+            title: "Command Execution",
+            detail: command ?? reason,
+            requestedPermissions: parseAdditionalPermissions(params["additionalPermissions"] as? [String: Any]),
+            availableActions: availableActions
+        )
+    }
+
+    private func parseFileApproval(requestId: RemoteRPCID, params: Any) -> RemotePendingApproval? {
+        guard let params = params as? [String: Any],
+              let threadId = params["threadId"] as? String,
+              let turnId = params["turnId"] as? String,
+              let itemId = params["itemId"] as? String else {
+            return nil
+        }
+
+        return RemotePendingApproval(
+            id: "approval-\(host.id)-\(itemId)",
+            requestId: requestId,
+            kind: .fileChange,
+            itemId: itemId,
+            threadId: threadId,
+            turnId: turnId,
+            title: "File Change",
+            detail: params["reason"] as? String,
+            requestedPermissions: .none,
+            availableActions: [.allow, .allowForSession, .deny, .cancel]
+        )
+    }
+
+    private func parsePermissionsApproval(requestId: RemoteRPCID, params: Any) -> RemotePendingApproval? {
+        guard let params = params as? [String: Any],
+              let threadId = params["threadId"] as? String,
+              let turnId = params["turnId"] as? String,
+              let itemId = params["itemId"] as? String else {
+            return nil
+        }
+
+        return RemotePendingApproval(
+            id: "approval-\(host.id)-\(itemId)",
+            requestId: requestId,
+            kind: .permissions,
+            itemId: itemId,
+            threadId: threadId,
+            turnId: turnId,
+            title: "Permissions Request",
+            detail: params["reason"] as? String,
+            requestedPermissions: parsePermissionProfile(params["permissions"] as? [String: Any]),
+            availableActions: [.allow, .allowForSession, .deny]
+        )
+    }
+
+    private func parseUserInputRequest(
+        requestId: RemoteRPCID,
+        params: Any
+    ) -> (threadId: String, interaction: PendingUserInputInteraction)? {
+        guard let params = params as? [String: Any],
+              let threadId = params["threadId"] as? String,
+              let _ = params["turnId"] as? String,
+              let itemId = params["itemId"] as? String,
+              let rawQuestions = params["questions"] as? [[String: Any]] else {
+            return nil
+        }
+
+        let questions = rawQuestions.compactMap { question -> PendingInteractionQuestion? in
+            guard let id = question["id"] as? String,
+                  let header = question["header"] as? String,
+                  let prompt = question["question"] as? String else {
+                return nil
+            }
+            let options = (question["options"] as? [[String: Any]] ?? []).compactMap { option -> PendingInteractionOption? in
+                guard let label = option["label"] as? String else { return nil }
+                return PendingInteractionOption(
+                    label: label,
+                    description: option["description"] as? String
+                )
+            }
+            return PendingInteractionQuestion(
+                id: id,
+                header: header,
+                question: prompt,
+                options: options,
+                isOther: question["isOther"] as? Bool ?? false,
+                isSecret: question["isSecret"] as? Bool ?? false
+            )
+        }
+
+        guard !questions.isEmpty else { return nil }
+
+        return (
+            threadId: threadId,
+            interaction: PendingUserInputInteraction(
+                id: itemId,
+                title: "Codex needs your input",
+                questions: questions,
+                transport: .remoteAppServer(requestId: requestId)
+            )
+        )
+    }
+
+    private func parseCommandApprovalActions(_ value: Any?) -> [PendingApprovalAction]? {
+        guard let rawActions = value as? [Any] else { return nil }
+        let actions = rawActions.compactMap { raw -> PendingApprovalAction? in
+            if let raw = raw as? String {
+                switch raw {
+                case "accept":
+                    return .allow
+                case "acceptForSession":
+                    return .allowForSession
+                case "decline":
+                    return .deny
+                case "cancel":
+                    return .cancel
+                default:
+                    return nil
+                }
+            }
+            if let raw = raw as? [String: Any] {
+                if raw["acceptWithExecpolicyAmendment"] != nil {
+                    return nil
+                }
+                if raw["applyNetworkPolicyAmendment"] != nil {
+                    return nil
+                }
+            }
+            return nil
+        }
+        return actions.isEmpty ? nil : actions
+    }
+
+    private func parseAdditionalPermissions(_ value: [String: Any]?) -> InteractionPermissionProfile {
+        parsePermissionProfile(value)
+    }
+
+    private func parsePermissionProfile(_ value: [String: Any]?) -> InteractionPermissionProfile {
+        guard let value else { return .none }
+        let network = value["network"] as? [String: Any]
+        let fileSystem = value["fileSystem"] as? [String: Any]
+        return InteractionPermissionProfile(
+            networkEnabled: network?["enabled"] as? Bool,
+            readRoots: fileSystem?["read"] as? [String] ?? [],
+            writeRoots: fileSystem?["write"] as? [String] ?? []
+        )
     }
 
     private func handleStderr(_ line: String) async {
@@ -1734,7 +1991,7 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
         continuation.resume(throwing: error)
     }
 
-    private func permissionGrantPayload(from profile: RemotePermissionProfile) -> [String: Any] {
+    private func permissionGrantPayload(from profile: InteractionPermissionProfile) -> [String: Any] {
         var payload: [String: Any] = [:]
         if let networkEnabled = profile.networkEnabled {
             payload["network"] = ["enabled": networkEnabled]

@@ -39,36 +39,6 @@ nonisolated enum RemoteApprovalKind: String, Sendable {
     case permissions
 }
 
-nonisolated struct RemotePermissionProfile: Equatable, Sendable {
-    var networkEnabled: Bool?
-    var readRoots: [String]
-    var writeRoots: [String]
-
-    static let none = RemotePermissionProfile(
-        networkEnabled: nil,
-        readRoots: [],
-        writeRoots: []
-    )
-
-    var isEmpty: Bool {
-        networkEnabled == nil && readRoots.isEmpty && writeRoots.isEmpty
-    }
-
-    var summary: String? {
-        var parts: [String] = []
-        if let networkEnabled {
-            parts.append(networkEnabled ? "network: enabled" : "network: restricted")
-        }
-        if !readRoots.isEmpty {
-            parts.append("read: \(readRoots.joined(separator: ", "))")
-        }
-        if !writeRoots.isEmpty {
-            parts.append("write: \(writeRoots.joined(separator: ", "))")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
-    }
-}
-
 nonisolated struct RemotePendingApproval: Identifiable, Equatable, Sendable {
     let id: String
     let requestId: RemoteRPCID
@@ -78,7 +48,8 @@ nonisolated struct RemotePendingApproval: Identifiable, Equatable, Sendable {
     let turnId: String
     let title: String
     let detail: String?
-    let requestedPermissions: RemotePermissionProfile
+    let requestedPermissions: InteractionPermissionProfile
+    let availableActions: [PendingApprovalAction]
 
     var formattedInput: String? {
         switch kind {
@@ -112,6 +83,7 @@ nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     var isLoaded: Bool
     var canSteerTurn: Bool
     var pendingApproval: RemotePendingApproval?
+    var pendingInteractions: [PendingInteraction]
     var connectionState: RemoteHostConnectionState
 
     var id: String { stableId }
@@ -145,11 +117,11 @@ nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     }
 
     var canStartTurn: Bool {
-        pendingApproval == nil && (phase == .idle || phase == .waitingForInput)
+        primaryPendingInteraction == nil && (phase == .idle || phase == .waitingForInput)
     }
 
     var canSendMessage: Bool {
-        pendingApproval == nil && (canStartTurn || canSteerTurn)
+        primaryPendingInteraction == nil && (canStartTurn || canSteerTurn)
     }
 
     var canInterrupt: Bool {
@@ -157,14 +129,51 @@ nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     }
 
     var approvalToolName: String? {
-        pendingApproval?.title
+        if case .approval(let interaction) = primaryPendingInteraction {
+            return interaction.title
+        }
+        return pendingApproval?.title
     }
 
     var pendingToolInput: String? {
-        pendingApproval?.formattedInput
+        if case .approval(let interaction) = primaryPendingInteraction {
+            return interaction.summaryText
+        }
+        return pendingApproval?.formattedInput
+    }
+
+    var primaryPendingInteraction: PendingInteraction? {
+        if let pending = pendingInteractions.first {
+            return pending
+        }
+        if let approval = pendingApproval {
+            return .approval(PendingApprovalInteraction(
+                id: approval.id,
+                title: approval.title,
+                kind: approval.pendingKind,
+                detail: approval.detail,
+                requestedPermissions: approval.requestedPermissions,
+                availableActions: approval.availableActions,
+                transport: .remoteAppServer(requestId: approval.requestId)
+            ))
+        }
+        return nil
     }
 
     var needsAttention: Bool {
-        phase.needsAttention
+        primaryPendingInteraction != nil || phase.needsAttention
+    }
+}
+
+extension RemotePendingApproval {
+    nonisolated var pendingKind: PendingApprovalKind {
+        switch kind {
+        case .commandExecution:
+            return .commandExecution
+        case .fileChange:
+            return .fileChange
+        case .permissions:
+            return .permissions
+        }
     }
 }

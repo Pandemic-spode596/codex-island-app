@@ -41,14 +41,12 @@ struct ChatView: View {
         self._hasLoadedOnce = State(initialValue: alreadyLoaded)
     }
 
-    /// Whether we're waiting for approval
-    private var isWaitingForApproval: Bool {
-        session.phase.isWaitingForApproval
+    private var pendingInteraction: PendingInteraction? {
+        session.primaryPendingInteraction
     }
 
-    /// Extract the tool name if waiting for approval
-    private var approvalTool: String? {
-        session.phase.approvalToolName
+    private var hasPendingInteraction: Bool {
+        pendingInteraction != nil
     }
 
     
@@ -67,29 +65,33 @@ struct ChatView: View {
                     messageList
                 }
 
-                // Approval bar, interactive prompt, or Input bar
-                if let tool = approvalTool {
-                    if tool == "AskUserQuestion" {
-                        // Interactive tools - show prompt to answer in terminal
-                        interactivePromptBar
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                                removal: .opacity
-                            ))
-                    } else {
-                        approvalBar(tool: tool)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                                removal: .opacity
-                            ))
-                    }
+                if let pendingInteraction {
+                    PendingInteractionBar(
+                        interaction: pendingInteraction,
+                        canRespondInline: NativeTerminalInputSender.shared.canSend(to: session),
+                        canOpenTerminal: session.canAttemptFocusTerminal,
+                        onApprovalAction: { action in
+                            respondToApproval(action)
+                        },
+                        onSubmitAnswers: { answers in
+                            respondToQuestions(answers)
+                        },
+                        onOpenTerminal: {
+                            focusTerminal()
+                        }
+                    )
+                    .id(pendingInteraction.id)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .bottom)),
+                        removal: .opacity
+                    ))
                 } else {
                     inputBar
                         .transition(.opacity)
                 }
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: hasPendingInteraction)
         .animation(nil, value: viewModel.status)
         .task {
             // Skip if already loaded (prevents redundant work on view recreation)
@@ -150,13 +152,11 @@ struct ChatView: View {
         .onReceive(sessionMonitor.$instances) { sessions in
             if let updated = sessions.first(where: { $0.logicalSessionId == logicalSessionId }),
                updated != session {
-                // Check if permission was just accepted (transition from waitingForApproval to processing)
-                let wasWaiting = isWaitingForApproval
+                let hadPendingInteraction = hasPendingInteraction
                 session = updated
                 let isNowProcessing = updated.phase == .processing
 
-                if wasWaiting && isNowProcessing {
-                    // Scroll to bottom after permission accepted (with slight delay)
+                if hadPendingInteraction && updated.primaryPendingInteraction == nil && isNowProcessing {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         shouldScrollToBottom = true
                     }
@@ -463,27 +463,6 @@ struct ChatView: View {
         .zIndex(1) // Render above message list
     }
 
-    // MARK: - Approval Bar
-
-    private func approvalBar(tool: String) -> some View {
-        ChatApprovalBar(
-            tool: tool,
-            toolInput: session.pendingToolInput,
-            onApprove: { approvePermission() },
-            onDeny: { denyPermission() }
-        )
-    }
-
-    // MARK: - Interactive Prompt Bar
-
-    /// Bar for interactive tools like AskUserQuestion that need terminal input
-    private var interactivePromptBar: some View {
-        ChatInteractivePromptBar(
-            isEnabled: session.canAttemptFocusTerminal,
-            onGoToTerminal: { focusTerminal() }
-        )
-    }
-
     // MARK: - Autoscroll Management
 
     /// Pause autoscroll (user scrolled away from bottom)
@@ -507,12 +486,12 @@ struct ChatView: View {
         }
     }
 
-    private func approvePermission() {
-        sessionMonitor.approvePermission(sessionId: session.sessionId)
+    private func respondToApproval(_ action: PendingApprovalAction) {
+        sessionMonitor.respond(sessionId: session.sessionId, action: action)
     }
 
-    private func denyPermission() {
-        sessionMonitor.denyPermission(sessionId: session.sessionId, reason: nil)
+    private func respondToQuestions(_ answers: PendingInteractionAnswerPayload) {
+        sessionMonitor.respond(sessionId: session.sessionId, answers: answers)
     }
 
     private func sendMessage() {
@@ -1035,54 +1014,38 @@ struct InterruptedMessageView: View {
 
 // MARK: - Chat Interactive Prompt Bar
 
-/// Bar for interactive tools like AskUserQuestion that need terminal input
-struct ChatInteractivePromptBar: View {
-    let isEnabled: Bool
-    let onGoToTerminal: () -> Void
+struct PendingInteractionBar: View {
+    let interaction: PendingInteraction
+    let canRespondInline: Bool
+    let canOpenTerminal: Bool
+    let onApprovalAction: (PendingApprovalAction) -> Void
+    let onSubmitAnswers: (PendingInteractionAnswerPayload) -> Void
+    let onOpenTerminal: () -> Void
+
+    @State private var currentQuestionIndex = 0
+    @State private var selectedAnswers: [String: String] = [:]
+    @State private var textAnswer = ""
 
     @State private var showContent = false
     @State private var showButton = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Tool info - same style as approval bar
-            VStack(alignment: .leading, spacing: 2) {
-                Text(MCPToolFormatter.formatToolName("AskUserQuestion"))
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(TerminalColors.amber)
-                Text("Codex needs your input")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.5))
-                    .lineLimit(1)
-            }
-            .opacity(showContent ? 1 : 0)
-            .offset(x: showContent ? 0 : -10)
+        VStack(alignment: .leading, spacing: 12) {
+            header
+                .opacity(showContent ? 1 : 0)
+                .offset(x: showContent ? 0 : -10)
 
-            Spacer()
-
-            // Terminal button on right (similar to Allow button)
-            Button {
-                if isEnabled {
-                    onGoToTerminal()
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 11, weight: .medium))
-                    Text("Terminal")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .foregroundColor(isEnabled ? .black : .white.opacity(0.4))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(isEnabled ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
-                .clipShape(Capsule())
+            switch interaction {
+            case .approval(let approval):
+                approvalActions(approval)
+                    .opacity(showButton ? 1 : 0)
+                    .scaleEffect(showButton ? 1 : 0.95)
+            case .userInput(let request):
+                userInputContent(request)
+                    .opacity(showButton ? 1 : 0)
+                    .scaleEffect(showButton ? 1 : 0.95)
             }
-            .buttonStyle(.plain)
-            .opacity(showButton ? 1 : 0)
-            .scaleEffect(showButton ? 1 : 0.8)
         }
-        .frame(minHeight: 44)  // Consistent height with other bars
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color.black.opacity(0.2))
@@ -1094,6 +1057,171 @@ struct ChatInteractivePromptBar: View {
                 showButton = true
             }
         }
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(MCPToolFormatter.formatToolName(interaction.title))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundColor(TerminalColors.amber)
+
+            Text(interaction.summaryText)
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.55))
+                .lineLimit(3)
+        }
+    }
+
+    @ViewBuilder
+    private func approvalActions(_ approval: PendingApprovalInteraction) -> some View {
+        HStack(spacing: 8) {
+            ForEach(approval.availableActions, id: \.self) { action in
+                Button {
+                    onApprovalAction(action)
+                } label: {
+                    Text(action.buttonTitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(action == .allow ? .black : .white.opacity(0.75))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(action == .allow ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func userInputContent(_ request: PendingUserInputInteraction) -> some View {
+        if !request.supportsInlineResponse || !canRespondInline {
+            HStack {
+                Spacer()
+                Button {
+                    if canOpenTerminal {
+                        onOpenTerminal()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "terminal")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("Terminal")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundColor(canOpenTerminal ? .black : .white.opacity(0.4))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(canOpenTerminal ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        } else if let question = request.questions[safe: currentQuestionIndex] {
+            VStack(alignment: .leading, spacing: 10) {
+                if request.questions.count > 1 {
+                    Text("Question \(currentQuestionIndex + 1) / \(request.questions.count)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.35))
+                }
+
+                Text(question.question)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+
+                if question.isChoiceQuestion {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(question.options.enumerated()), id: \.offset) { _, option in
+                            Button {
+                                selectedAnswers[question.id] = option.label
+                                advanceOrSubmit(request: request)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(option.label)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.white)
+                                    if let description = option.description, !description.isEmpty {
+                                        Text(description)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.white.opacity(0.45))
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color.white.opacity(0.08))
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        TextField("Type your answer", text: $textAnswer)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .fill(Color.white.opacity(0.08))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 18)
+                                            .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                                    )
+                            )
+                            .onSubmit {
+                                selectedAnswers[question.id] = textAnswer
+                                advanceOrSubmit(request: request)
+                            }
+
+                        Button {
+                            selectedAnswers[question.id] = textAnswer
+                            advanceOrSubmit(request: request)
+                        } label: {
+                            Text(currentQuestionIndex + 1 == request.questions.count ? "Send" : "Next")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.black)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(textAnswer.isEmpty ? 0.2 : 0.95))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(textAnswer.isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    private func advanceOrSubmit(request: PendingUserInputInteraction) {
+        if currentQuestionIndex + 1 < request.questions.count {
+            currentQuestionIndex += 1
+            textAnswer = selectedAnswers[request.questions[currentQuestionIndex].id] ?? ""
+            return
+        }
+
+        var answers: [String: [String]] = [:]
+        for question in request.questions {
+            if let value = selectedAnswers[question.id], !value.isEmpty {
+                answers[question.id] = [value]
+            } else {
+                answers[question.id] = []
+            }
+        }
+        onSubmitAnswers(PendingInteractionAnswerPayload(answers: answers))
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard indices.contains(index) else { return nil }
+        return self[index]
     }
 }
 

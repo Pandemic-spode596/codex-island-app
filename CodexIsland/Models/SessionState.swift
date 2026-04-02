@@ -54,6 +54,9 @@ struct SessionState: Equatable, Identifiable, Sendable {
     /// State for Task tools and their nested subagent tools
     var subagentState: SubagentState
 
+    /// Pending interactions that require user input or approval
+    var pendingInteractions: [PendingInteraction]
+
     // MARK: - Conversation Info (from JSONL parsing)
 
     var conversationInfo: ConversationInfo
@@ -97,6 +100,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         chatItems: [ChatHistoryItem] = [],
         toolTracker: ToolTracker = ToolTracker(),
         subagentState: SubagentState = SubagentState(),
+        pendingInteractions: [PendingInteraction] = [],
         conversationInfo: ConversationInfo = ConversationInfo(
             summary: nil, lastMessage: nil, lastMessageRole: nil,
             lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil
@@ -126,6 +130,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         self.chatItems = chatItems
         self.toolTracker = toolTracker
         self.subagentState = subagentState
+        self.pendingInteractions = pendingInteractions
         self.conversationInfo = conversationInfo
         self.needsClearReconciliation = needsClearReconciliation
         self.lastActivity = lastActivity
@@ -136,7 +141,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
 
     /// Whether this session needs user attention
     var needsAttention: Bool {
-        phase.needsAttention
+        primaryPendingInteraction != nil || phase.needsAttention
     }
 
     /// The active permission context, if any
@@ -145,6 +150,22 @@ struct SessionState: Equatable, Identifiable, Sendable {
             return ctx
         }
         return nil
+    }
+
+    var primaryPendingInteraction: PendingInteraction? {
+        if let pending = pendingInteractions.first {
+            return pending
+        }
+        guard let permission = activePermission else { return nil }
+        return .approval(PendingApprovalInteraction(
+            id: permission.toolUseId,
+            title: permission.toolName,
+            kind: .generic,
+            detail: permission.formattedInput,
+            requestedPermissions: .none,
+            availableActions: [.allow, .deny],
+            transport: .hookPermission(toolUseId: permission.toolUseId)
+        ))
     }
 
     // MARK: - UI Convenience Properties
@@ -166,17 +187,26 @@ struct SessionState: Equatable, Identifiable, Sendable {
 
     /// Pending tool name if waiting for approval
     var pendingToolName: String? {
-        activePermission?.toolName
+        if case .approval(let interaction) = primaryPendingInteraction {
+            return interaction.title
+        }
+        return activePermission?.toolName
     }
 
     /// Pending tool use ID
     var pendingToolId: String? {
-        activePermission?.toolUseId
+        if let pending = primaryPendingInteraction {
+            return pending.id
+        }
+        return activePermission?.toolUseId
     }
 
     /// Formatted pending tool input for display
     var pendingToolInput: String? {
-        activePermission?.formattedInput
+        if case .approval(let interaction) = primaryPendingInteraction {
+            return interaction.summaryText
+        }
+        return activePermission?.formattedInput
     }
 
     /// Last message content
@@ -211,7 +241,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
 
     /// Whether the session can be interacted with
     var canInteract: Bool {
-        phase.needsAttention
+        primaryPendingInteraction != nil || phase.needsAttention
     }
 
     var canFocusTerminal: Bool {

@@ -17,6 +17,7 @@ actor CodexConversationParser {
         let completedToolIds: Set<String>
         let toolResults: [String: ConversationParser.ToolResult]
         let structuredResults: [String: ToolResultData]
+        let pendingInteractions: [PendingInteraction]
         let conversationInfo: ConversationInfo
     }
 
@@ -52,6 +53,7 @@ actor CodexConversationParser {
                 completedToolIds: [],
                 toolResults: [:],
                 structuredResults: [:],
+                pendingInteractions: [],
                 clearDetected: false
             )
         }
@@ -74,6 +76,7 @@ actor CodexConversationParser {
             completedToolIds: snapshot.completedToolIds,
             toolResults: snapshot.toolResults,
             structuredResults: snapshot.structuredResults,
+            pendingInteractions: snapshot.pendingInteractions,
             clearDetected: false
         )
     }
@@ -88,6 +91,10 @@ actor CodexConversationParser {
 
     func structuredResults(sessionId: String, transcriptPath: String?) -> [String: ToolResultData] {
         loadSnapshot(sessionId: sessionId, transcriptPath: transcriptPath)?.structuredResults ?? [:]
+    }
+
+    func pendingInteractions(sessionId: String, transcriptPath: String?) -> [PendingInteraction] {
+        loadSnapshot(sessionId: sessionId, transcriptPath: transcriptPath)?.pendingInteractions ?? []
     }
 
     private func loadSnapshot(sessionId: String, transcriptPath: String?) -> Snapshot? {
@@ -122,6 +129,7 @@ actor CodexConversationParser {
                 completedToolIds: [],
                 toolResults: [:],
                 structuredResults: [:],
+                pendingInteractions: [],
                 conversationInfo: ConversationInfo(
                     summary: nil,
                     lastMessage: nil,
@@ -136,7 +144,8 @@ actor CodexConversationParser {
         var messages: [ChatMessage] = []
         var completedToolIds: Set<String> = []
         var toolResults: [String: ConversationParser.ToolResult] = [:]
-        var latestAttention: (text: String, role: String, toolName: String?)?
+        var pendingInteractionOrder: [String] = []
+        var pendingInteractions: [String: PendingInteraction] = [:]
 
         let lines = content.components(separatedBy: .newlines).filter { !$0.isEmpty }
         for (lineIndex, line) in lines.enumerated() {
@@ -157,7 +166,9 @@ actor CodexConversationParser {
                     timestamp: timestamp,
                     messages: &messages,
                     completedToolIds: &completedToolIds,
-                    toolResults: &toolResults
+                    toolResults: &toolResults,
+                    pendingInteractionOrder: &pendingInteractionOrder,
+                    pendingInteractions: &pendingInteractions
                 )
             case "event_msg":
                 guard let payload = json["payload"] as? [String: Any],
@@ -170,7 +181,8 @@ actor CodexConversationParser {
                     payload: eventPayload,
                     completedToolIds: &completedToolIds,
                     toolResults: &toolResults,
-                    latestAttention: &latestAttention
+                    pendingInteractionOrder: &pendingInteractionOrder,
+                    pendingInteractions: &pendingInteractions
                 )
             default:
                 continue
@@ -178,7 +190,11 @@ actor CodexConversationParser {
         }
 
         messages.sort { $0.timestamp < $1.timestamp }
-        let conversationInfo = buildConversationInfo(messages: messages, latestAttention: latestAttention)
+        let orderedPendingInteractions = pendingInteractionOrder.compactMap { pendingInteractions[$0] }
+        let conversationInfo = buildConversationInfo(
+            messages: messages,
+            pendingInteractions: orderedPendingInteractions
+        )
 
         return Snapshot(
             modificationDate: modificationDate,
@@ -187,6 +203,7 @@ actor CodexConversationParser {
             completedToolIds: completedToolIds,
             toolResults: toolResults,
             structuredResults: [:],
+            pendingInteractions: orderedPendingInteractions,
             conversationInfo: conversationInfo
         )
     }
@@ -197,7 +214,9 @@ actor CodexConversationParser {
         timestamp: Date,
         messages: inout [ChatMessage],
         completedToolIds: inout Set<String>,
-        toolResults: inout [String: ConversationParser.ToolResult]
+        toolResults: inout [String: ConversationParser.ToolResult],
+        pendingInteractionOrder: inout [String],
+        pendingInteractions: inout [String: PendingInteraction]
     ) {
         guard let payloadType = payload["type"] as? String else { return }
 
@@ -242,12 +261,23 @@ actor CodexConversationParser {
         case "function_call":
             guard let callId = payload["call_id"] as? String else { return }
             let name = payload["name"] as? String ?? "Tool"
+            let arguments = payload["arguments"] as? String
             messages.append(ChatMessage(
                 id: "codex-tool-\(callId)",
                 role: .assistant,
                 timestamp: timestamp,
-                content: [.toolUse(ToolUseBlock(id: callId, name: name, input: parseJSONStringInput(payload["arguments"] as? String)))]
+                content: [.toolUse(ToolUseBlock(id: callId, name: name, input: parseJSONStringInput(arguments)))]
             ))
+            if let interaction = parsePendingInteraction(
+                callId: callId,
+                toolName: name,
+                arguments: arguments
+            ) {
+                pendingInteractions[interaction.id] = interaction
+                if !pendingInteractionOrder.contains(interaction.id) {
+                    pendingInteractionOrder.append(interaction.id)
+                }
+            }
 
         case "custom_tool_call":
             guard let callId = payload["call_id"] as? String else { return }
@@ -315,6 +345,8 @@ actor CodexConversationParser {
                 stderr: nil,
                 isError: false
             )
+            pendingInteractions.removeValue(forKey: callId)
+            pendingInteractionOrder.removeAll { $0 == callId }
 
         case "custom_tool_call_output":
             guard let callId = payload["call_id"] as? String else { return }
@@ -326,6 +358,8 @@ actor CodexConversationParser {
                 stderr: nil,
                 isError: false
             )
+            pendingInteractions.removeValue(forKey: callId)
+            pendingInteractionOrder.removeAll { $0 == callId }
 
         case "tool_search_output":
             let callId = (payload["call_id"] as? String) ?? "tool-search-output-\(lineIndex)"
@@ -348,7 +382,8 @@ actor CodexConversationParser {
         payload: [String: Any],
         completedToolIds: inout Set<String>,
         toolResults: inout [String: ConversationParser.ToolResult],
-        latestAttention: inout (text: String, role: String, toolName: String?)?
+        pendingInteractionOrder: inout [String],
+        pendingInteractions: inout [String: PendingInteraction]
     ) {
         switch eventType {
         case "exec_command_end":
@@ -365,14 +400,25 @@ actor CodexConversationParser {
                 isError: exitCode != 0
             )
 
-        case "request_user_input":
-            latestAttention = ("Codex needs your input", "assistant", nil)
+        case "request_permissions":
+            if let interaction = parseRequestPermissionsEvent(payload: payload) {
+                pendingInteractions[interaction.id] = interaction
+                if !pendingInteractionOrder.contains(interaction.id) {
+                    pendingInteractionOrder.append(interaction.id)
+                }
+            }
 
-        case "request_permissions", "exec_approval_request":
-            latestAttention = ("Codex is waiting for approval", "assistant", nil)
+        case "exec_approval_request":
+            if let interaction = parseExecApprovalEvent(payload: payload) {
+                pendingInteractions[interaction.id] = interaction
+                if !pendingInteractionOrder.contains(interaction.id) {
+                    pendingInteractionOrder.append(interaction.id)
+                }
+            }
 
         case "turn_complete", "task_complete", "turn_aborted":
-            latestAttention = nil
+            pendingInteractions.removeAll()
+            pendingInteractionOrder.removeAll()
 
         default:
             break
@@ -381,7 +427,7 @@ actor CodexConversationParser {
 
     private func buildConversationInfo(
         messages: [ChatMessage],
-        latestAttention: (text: String, role: String, toolName: String?)?
+        pendingInteractions: [PendingInteraction]
     ) -> ConversationInfo {
         let firstUser = messages.first(where: { $0.role == .user })?.textContent
         let lastUser = messages.last(where: { $0.role == .user })
@@ -409,10 +455,10 @@ actor CodexConversationParser {
             .first
 
         let (lastMessage, lastRole, lastToolName): (String?, String?, String?)
-        if let latestAttention {
-            lastMessage = latestAttention.text
-            lastRole = latestAttention.role
-            lastToolName = latestAttention.toolName
+        if let latestPending = pendingInteractions.last {
+            lastMessage = latestPending.summaryText
+            lastRole = "assistant"
+            lastToolName = latestPending.isApproval ? latestPending.title : nil
         } else if let lastTool {
             lastMessage = truncate(lastTool.preview)
             lastRole = "tool"
@@ -475,10 +521,163 @@ actor CodexConversationParser {
         return command.joined(separator: " ")
     }
 
-    private func parseJSONStringInput(_ arguments: String?) -> [String: String] {
+    private func parsePendingInteraction(
+        callId: String,
+        toolName: String,
+        arguments: String?
+    ) -> PendingInteraction? {
+        switch toolName {
+        case "request_user_input":
+            guard let json = parseJSONArguments(arguments),
+                  let questions = parseInteractionQuestions(json["questions"] as? [[String: Any]]),
+                  !questions.isEmpty else {
+                return nil
+            }
+            return .userInput(PendingUserInputInteraction(
+                id: callId,
+                title: "Codex needs your input",
+                questions: questions,
+                transport: .codexLocal(callId: callId, turnId: nil)
+            ))
+        case "request_permissions":
+            guard let json = parseJSONArguments(arguments) else { return nil }
+            return .approval(PendingApprovalInteraction(
+                id: callId,
+                title: "Permissions Request",
+                kind: .permissions,
+                detail: json["reason"] as? String,
+                requestedPermissions: parsePermissionProfile(json["permissions"] as? [String: Any]),
+                availableActions: [.allow, .allowForSession, .deny],
+                transport: .codexLocal(callId: callId, turnId: nil)
+            ))
+        default:
+            return nil
+        }
+    }
+
+    private func parseRequestPermissionsEvent(payload: [String: Any]) -> PendingInteraction? {
+        guard let callId = payload["call_id"] as? String else { return nil }
+        return .approval(PendingApprovalInteraction(
+            id: callId,
+            title: "Permissions Request",
+            kind: .permissions,
+            detail: payload["reason"] as? String,
+            requestedPermissions: parsePermissionProfile(payload["permissions"] as? [String: Any]),
+            availableActions: [.allow, .allowForSession, .deny],
+            transport: .codexLocal(callId: callId, turnId: payload["turn_id"] as? String)
+        ))
+    }
+
+    private func parseExecApprovalEvent(payload: [String: Any]) -> PendingInteraction? {
+        let callId = payload["approval_id"] as? String ?? payload["call_id"] as? String
+        guard let callId else { return nil }
+        let command = parseExecApprovalCommand(payload["command"])
+        let detail = [command, payload["reason"] as? String]
+            .compactMap { value -> String? in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+            .joined(separator: "\n")
+        let availableActions = parseApprovalActions(payload["available_decisions"]) ?? [.allow, .cancel]
+        return .approval(PendingApprovalInteraction(
+            id: callId,
+            title: "Command Execution",
+            kind: .commandExecution,
+            detail: detail.isEmpty ? nil : detail,
+            requestedPermissions: parsePermissionProfile(payload["additional_permissions"] as? [String: Any]),
+            availableActions: availableActions,
+            transport: .codexLocal(callId: payload["call_id"] as? String, turnId: payload["turn_id"] as? String)
+        ))
+    }
+
+    private func parseExecApprovalCommand(_ value: Any?) -> String? {
+        if let command = value as? String {
+            return command
+        }
+        if let command = value as? [String] {
+            return command.joined(separator: " ")
+        }
+        if let command = value as? [Any] {
+            return command.compactMap { $0 as? String }.joined(separator: " ")
+        }
+        return nil
+    }
+
+    private func parseApprovalActions(_ value: Any?) -> [PendingApprovalAction]? {
+        guard let rawArray = value as? [Any] else { return nil }
+        let actions = rawArray.compactMap { raw -> PendingApprovalAction? in
+            if let string = raw as? String {
+                switch string {
+                case "approved", "accept":
+                    return .allow
+                case "approved_for_session", "acceptForSession":
+                    return .allowForSession
+                case "denied", "decline":
+                    return .deny
+                case "abort", "cancel":
+                    return .cancel
+                default:
+                    return nil
+                }
+            }
+            return nil
+        }
+        return actions.isEmpty ? nil : actions
+    }
+
+    private func parseInteractionQuestions(_ value: [[String: Any]]?) -> [PendingInteractionQuestion]? {
+        guard let value else { return nil }
+        let questions = value.compactMap { question -> PendingInteractionQuestion? in
+            guard let id = question["id"] as? String,
+                  let header = question["header"] as? String,
+                  let prompt = question["question"] as? String else {
+                return nil
+            }
+
+            let options = (question["options"] as? [[String: Any]] ?? []).compactMap { option -> PendingInteractionOption? in
+                guard let label = option["label"] as? String else { return nil }
+                return PendingInteractionOption(
+                    label: label,
+                    description: option["description"] as? String
+                )
+            }
+
+            return PendingInteractionQuestion(
+                id: id,
+                header: header,
+                question: prompt,
+                options: options,
+                isOther: question["isOther"] as? Bool ?? question["is_other"] as? Bool ?? false,
+                isSecret: question["isSecret"] as? Bool ?? question["is_secret"] as? Bool ?? false
+            )
+        }
+        return questions.isEmpty ? nil : questions
+    }
+
+    private func parsePermissionProfile(_ value: [String: Any]?) -> InteractionPermissionProfile {
+        guard let value else { return .none }
+
+        let networkValue = value["network"] as? [String: Any]
+        let fileSystemValue = value["fileSystem"] as? [String: Any] ?? value["file_system"] as? [String: Any]
+
+        return InteractionPermissionProfile(
+            networkEnabled: networkValue?["enabled"] as? Bool,
+            readRoots: fileSystemValue?["read"] as? [String] ?? [],
+            writeRoots: fileSystemValue?["write"] as? [String] ?? []
+        )
+    }
+
+    private func parseJSONArguments(_ arguments: String?) -> [String: Any]? {
         guard let arguments,
               let data = arguments.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    private func parseJSONStringInput(_ arguments: String?) -> [String: String] {
+        guard let json = parseJSONArguments(arguments) else {
             return [:]
         }
         return parseJSONObjectInput(json)

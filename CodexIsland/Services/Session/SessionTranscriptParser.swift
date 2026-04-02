@@ -87,4 +87,16 @@ actor SessionTranscriptParser {
             )
         }
     }
+
+    func pendingInteractions(session: SessionState) async -> [PendingInteraction] {
+        switch session.provider {
+        case .claude:
+            return await ConversationParser.shared.pendingInteractions(for: session.sessionId)
+        case .codex:
+            return await CodexConversationParser.shared.pendingInteractions(
+                sessionId: session.sessionId,
+                transcriptPath: session.transcriptPath
+            )
+        }
+    }
 }

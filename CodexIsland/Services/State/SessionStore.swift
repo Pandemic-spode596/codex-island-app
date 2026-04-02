@@ -81,13 +81,14 @@ actor SessionStore {
         case .loadHistory(let sessionId, let cwd):
             await loadHistoryFromFile(sessionId: sessionId, cwd: cwd)
 
-        case .historyLoaded(let sessionId, let messages, let completedTools, let toolResults, let structuredResults, let conversationInfo):
+        case .historyLoaded(let sessionId, let messages, let completedTools, let toolResults, let structuredResults, let pendingInteractions, let conversationInfo):
             await processHistoryLoaded(
                 sessionId: sessionId,
                 messages: messages,
                 completedTools: completedTools,
                 toolResults: toolResults,
                 structuredResults: structuredResults,
+                pendingInteractions: pendingInteractions,
                 conversationInfo: conversationInfo
             )
 
@@ -701,6 +702,7 @@ actor SessionStore {
         // Update conversationInfo from JSONL (summary, lastMessage, etc.)
         let conversationInfo = await SessionTranscriptParser.shared.parse(session: session)
         session.conversationInfo = conversationInfo
+        session.pendingInteractions = payload.pendingInteractions
 
         // Handle /clear reconciliation - remove items that no longer exist in parser state
         if session.needsClearReconciliation {
@@ -1038,6 +1040,7 @@ actor SessionStore {
         // Mark that a clear happened - the next fileUpdated will reconcile
         // by removing items that no longer exist in the parser's state
         session.needsClearReconciliation = true
+        session.pendingInteractions.removeAll()
         sessions[sessionId] = session
 
         Self.logger.info("/clear processed for session \(sessionId.prefix(8), privacy: .public) - marked for reconciliation")
@@ -1058,6 +1061,7 @@ actor SessionStore {
         let completedTools = await SessionTranscriptParser.shared.completedToolIds(session: session)
         let toolResults = await SessionTranscriptParser.shared.toolResults(session: session)
         let structuredResults = await SessionTranscriptParser.shared.structuredResults(session: session)
+        let pendingInteractions = await SessionTranscriptParser.shared.pendingInteractions(session: session)
 
         // Also parse conversationInfo (summary, lastMessage, etc.)
         let conversationInfo = await SessionTranscriptParser.shared.parse(session: session)
@@ -1069,6 +1073,7 @@ actor SessionStore {
             completedTools: completedTools,
             toolResults: toolResults,
             structuredResults: structuredResults,
+            pendingInteractions: pendingInteractions,
             conversationInfo: conversationInfo
         ))
     }
@@ -1079,12 +1084,14 @@ actor SessionStore {
         completedTools: Set<String>,
         toolResults: [String: ConversationParser.ToolResult],
         structuredResults: [String: ToolResultData],
+        pendingInteractions: [PendingInteraction],
         conversationInfo: ConversationInfo
     ) async {
         guard var session = sessions[sessionId] else { return }
 
         // Update conversationInfo (summary, lastMessage, etc.)
         session.conversationInfo = conversationInfo
+        session.pendingInteractions = pendingInteractions
 
         // Convert messages to chat items
         let existingIds = Set(session.chatItems.map { $0.id })
@@ -1145,7 +1152,8 @@ actor SessionStore {
                 isIncremental: !result.clearDetected,
                 completedToolIds: result.completedToolIds,
                 toolResults: result.toolResults,
-                structuredResults: result.structuredResults
+                structuredResults: result.structuredResults,
+                pendingInteractions: result.pendingInteractions
             )
 
             await self.process(.fileUpdated(payload))

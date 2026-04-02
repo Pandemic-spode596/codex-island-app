@@ -283,6 +283,7 @@ actor ConversationParser {
         let completedToolIds: Set<String>
         let toolResults: [String: ToolResult]
         let structuredResults: [String: ToolResultData]
+        let pendingInteractions: [PendingInteraction]
         let clearDetected: Bool
     }
 
@@ -297,6 +298,7 @@ actor ConversationParser {
                 completedToolIds: [],
                 toolResults: [:],
                 structuredResults: [:],
+                pendingInteractions: [],
                 clearDetected: false
             )
         }
@@ -315,6 +317,7 @@ actor ConversationParser {
             completedToolIds: state.completedToolIds,
             toolResults: state.toolResults,
             structuredResults: state.structuredResults,
+            pendingInteractions: [],
             clearDetected: clearDetected
         )
     }
@@ -439,6 +442,10 @@ actor ConversationParser {
     /// Get structured tool results for a session
     func structuredResults(for sessionId: String) -> [String: ToolResultData] {
         return incrementalState[sessionId]?.structuredResults ?? [:]
+    }
+
+    func pendingInteractions(for sessionId: String) -> [PendingInteraction] {
+        []
     }
 
     /// Reset incremental state for a session (call when reloading)
@@ -1054,4 +1061,3 @@ extension ConversationParser {
         return tools
     }
 }
-

@@ -47,6 +47,7 @@ class ChatHistoryManager: ObservableObject {
         let completedTools = await SessionTranscriptParser.shared.completedToolIds(session: session)
         let toolResults = await SessionTranscriptParser.shared.toolResults(session: session)
         let structuredResults = await SessionTranscriptParser.shared.structuredResults(session: session)
+        let pendingInteractions = await SessionTranscriptParser.shared.pendingInteractions(session: session)
 
         let payload = FileUpdatePayload(
             sessionId: sessionId,
@@ -55,7 +56,8 @@ class ChatHistoryManager: ObservableObject {
             isIncremental: false,  // Full sync
             completedToolIds: completedTools,
             toolResults: toolResults,
-            structuredResults: structuredResults
+            structuredResults: structuredResults,
+            pendingInteractions: pendingInteractions
         )
 
         await SessionStore.shared.process(.fileUpdated(payload))

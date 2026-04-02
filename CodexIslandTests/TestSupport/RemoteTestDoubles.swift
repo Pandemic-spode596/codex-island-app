@@ -104,6 +104,8 @@ final class FakeRemoteConnection: RemoteAppServerConnectionProtocol, @unchecked 
     var sendMessageHandler: (@Sendable (String, String, String?) async throws -> Void)?
     var interruptHandler: (@Sendable (String, String) async throws -> Void)?
     var respondHandler: (@Sendable (RemotePendingApproval, Bool) async throws -> Void)?
+    var respondActionHandler: (@Sendable (RemotePendingApproval, PendingApprovalAction) async throws -> Void)?
+    var respondUserInputHandler: (@Sendable (PendingUserInputInteraction, PendingInteractionAnswerPayload) async throws -> Void)?
     var refreshThreadsHandler: (@Sendable () async throws -> Void)?
 
     private(set) var startCalled = false
@@ -152,6 +154,18 @@ final class FakeRemoteConnection: RemoteAppServerConnectionProtocol, @unchecked 
 
     func respond(to approval: RemotePendingApproval, allow: Bool) async throws {
         try await respondHandler?(approval, allow)
+    }
+
+    func respond(to approval: RemotePendingApproval, action: PendingApprovalAction) async throws {
+        if let respondActionHandler {
+            try await respondActionHandler(approval, action)
+            return
+        }
+        try await respondHandler?(approval, action == .allow)
+    }
+
+    func respond(to interaction: PendingUserInputInteraction, answers: PendingInteractionAnswerPayload) async throws {
+        try await respondUserInputHandler?(interaction, answers)
     }
 
     func refreshThreads() async throws {
