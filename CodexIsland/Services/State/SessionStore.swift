@@ -707,7 +707,13 @@ actor SessionStore {
         let conversationInfo = await SessionTranscriptParser.shared.parse(session: session)
         session.conversationInfo = conversationInfo
         session.pendingInteractions = payload.pendingInteractions
-        if session.provider == .codex, let transcriptPhase = payload.transcriptPhase {
+        if session.provider == .codex,
+           let transcriptPhase = payload.transcriptPhase,
+           shouldApplyCodexTranscriptPhase(
+               currentPhase: session.phase,
+               transcriptPhase: transcriptPhase,
+               pendingInteractions: payload.pendingInteractions
+           ) {
             session.phase = transcriptPhase
         }
 
@@ -1112,7 +1118,13 @@ actor SessionStore {
         // Update conversationInfo (summary, lastMessage, etc.)
         session.conversationInfo = conversationInfo
         session.pendingInteractions = pendingInteractions
-        if session.provider == .codex, let transcriptPhase {
+        if session.provider == .codex,
+           let transcriptPhase,
+           shouldApplyCodexTranscriptPhase(
+               currentPhase: session.phase,
+               transcriptPhase: transcriptPhase,
+               pendingInteractions: pendingInteractions
+           ) {
             session.phase = transcriptPhase
         }
 
@@ -1142,6 +1154,26 @@ actor SessionStore {
         session.chatItems.sort { $0.timestamp < $1.timestamp }
 
         sessions[sessionId] = session
+    }
+
+    private func shouldApplyCodexTranscriptPhase(
+        currentPhase: SessionPhase,
+        transcriptPhase: SessionPhase,
+        pendingInteractions: [PendingInteraction]
+    ) -> Bool {
+        if !pendingInteractions.isEmpty {
+            return true
+        }
+
+        if currentPhase == .waitingForInput && transcriptPhase == .processing {
+            return false
+        }
+
+        if currentPhase == .idle && transcriptPhase == .processing {
+            return false
+        }
+
+        return true
     }
 
     // MARK: - File Sync Scheduling
