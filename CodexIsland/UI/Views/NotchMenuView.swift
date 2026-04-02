@@ -120,6 +120,7 @@ struct NotchMenuView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
+            .padding(.bottom, 28)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .scrollBounceBehavior(.basedOnSize)
