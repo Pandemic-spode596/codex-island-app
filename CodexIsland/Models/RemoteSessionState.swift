@@ -93,7 +93,8 @@ nonisolated struct RemotePendingApproval: Identifiable, Equatable, Sendable {
 nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     let hostId: String
     let hostName: String
-    let threadId: String
+    var threadId: String
+    var logicalSessionId: String
 
     var preview: String
     var name: String?
@@ -116,6 +117,10 @@ nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     var id: String { stableId }
 
     var stableId: String {
+        logicalSessionId
+    }
+
+    var rawStableId: String {
         "remote-\(hostId)-\(threadId)"
     }
 

@@ -123,6 +123,13 @@ class CodexSessionMonitor: ObservableObject {
     // MARK: - State Update
 
     private func updateFromSessions(_ sessions: [SessionState]) {
+        let previousSessionIds = Set(instances.map(\.sessionId))
+        let currentSessionIds = Set(sessions.map(\.sessionId))
+        let removedSessionIds = previousSessionIds.subtracting(currentSessionIds)
+        for sessionId in removedSessionIds {
+            InterruptWatcherManager.shared.stopWatching(sessionId: sessionId)
+        }
+
         instances = sessions
         pendingInstances = sessions.filter { $0.needsAttention }
     }

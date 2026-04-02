@@ -24,6 +24,9 @@ actor SessionStore {
     /// All sessions keyed by sessionId
     private var sessions: [String: SessionState] = [:]
 
+    /// Published logical session slots keyed by logicalSessionId
+    private var logicalBindings: [String: String] = [:]
+
     /// Pending file syncs (debounced)
     private var pendingSyncs: [String: Task<Void, Never>] = [:]
 
@@ -125,7 +128,7 @@ actor SessionStore {
 
         // Track new session in Mixpanel
         if isNewSession {
-            Mixpanel.mainInstance().track(event: "Session Started")
+            Mixpanel.safeMainInstance()?.track(event: "Session Started")
         }
 
         session.transcriptPath = event.transcriptPath ?? session.transcriptPath
@@ -154,9 +157,10 @@ actor SessionStore {
             applyTerminalResolution(resolution, to: &session)
         }
 
+        session.logicalSessionId = resolveLogicalSessionId(for: session)
+
         if event.status == "ended" {
-            sessions.removeValue(forKey: sessionId)
-            cancelPendingSync(sessionId: sessionId)
+            removeSession(sessionId: sessionId)
             return
         }
 
@@ -180,6 +184,7 @@ actor SessionStore {
             session.subagentState = SubagentState()
         }
 
+        bind(session: &session)
         sessions[sessionId] = session
         publishState()
 
@@ -191,6 +196,7 @@ actor SessionStore {
     private func createSession(from event: HookEvent) -> SessionState {
         SessionState(
             sessionId: event.sessionId,
+            logicalSessionId: event.sessionId,
             provider: event.provider,
             cwd: event.cwd,
             projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
@@ -233,6 +239,92 @@ actor SessionStore {
         session.terminalProcessId = resolution.terminalProcessId ?? session.terminalProcessId
         session.focusTarget = resolution.focusTarget
         session.focusCapability = resolution.focusCapability
+    }
+
+    private func resolveLogicalSessionId(for session: SessionState) -> String {
+        let appId = normalizedTerminalIdentity(for: session)
+
+        if let surfaceId = normalizedComponent(session.terminalSurfaceId) {
+            return "local|\(appId)|surface|\(surfaceId)"
+        }
+
+        if let windowId = normalizedComponent(session.terminalWindowId),
+           let tabId = normalizedComponent(session.terminalTabId) {
+            return "local|\(appId)|window-tab|\(windowId)|\(tabId)"
+        }
+
+        if let windowId = normalizedComponent(session.terminalWindowId) {
+            return "local|\(appId)|window|\(windowId)"
+        }
+
+        if let tty = normalizedComponent(session.tty) {
+            return "local|\(appId)|tty|\(tty)"
+        }
+
+        if let terminalPid = session.terminalProcessId {
+            return "local|\(appId)|terminal-pid|\(terminalPid)"
+        }
+
+        if let pid = session.pid {
+            return "local|\(appId)|pid|\(pid)"
+        }
+
+        return "local|fallback|\(session.sessionId)"
+    }
+
+    private func normalizedTerminalIdentity(for session: SessionState) -> String {
+        if let bundleId = normalizedComponent(session.terminalBundleId) {
+            return bundleId
+        }
+
+        if let terminalName = normalizedComponent(session.terminalName) {
+            return terminalName
+        }
+
+        return "unknown-terminal"
+    }
+
+    private func normalizedComponent(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed.lowercased()
+    }
+
+    private func bind(session: inout SessionState) {
+        let sessionId = session.sessionId
+        let logicalSessionId = session.logicalSessionId
+
+        if let existingLogicalId = sessions[sessionId]?.logicalSessionId,
+           existingLogicalId != logicalSessionId {
+            logicalBindings.removeValue(forKey: existingLogicalId)
+        }
+
+        if let displacedSessionId = logicalBindings[logicalSessionId],
+           displacedSessionId != sessionId {
+            removeSession(sessionId: displacedSessionId, removeLogicalBinding: false)
+        }
+
+        logicalBindings[logicalSessionId] = sessionId
+    }
+
+    private func removeSession(sessionId: String, removeLogicalBinding: Bool = true) {
+        guard let removed = sessions.removeValue(forKey: sessionId) else {
+            cancelPendingSync(sessionId: sessionId)
+            return
+        }
+
+        if removeLogicalBinding {
+            logicalBindings.removeValue(forKey: removed.logicalSessionId)
+        }
+
+        cancelPendingSync(sessionId: sessionId)
+        if removed.provider == .claude {
+            Task {
+                await ConversationParser.shared.resetState(for: sessionId)
+            }
+        }
     }
 
     private func processToolTracking(event: HookEvent, session: inout SessionState) {
@@ -893,8 +985,7 @@ actor SessionStore {
     // MARK: - Session End Processing
 
     private func processSessionEnd(sessionId: String) async {
-        sessions.removeValue(forKey: sessionId)
-        cancelPendingSync(sessionId: sessionId)
+        removeSession(sessionId: sessionId)
     }
 
     // MARK: - History Loading
@@ -1008,7 +1099,15 @@ actor SessionStore {
     // MARK: - State Publishing
 
     private func publishState() {
-        let sortedSessions = Array(sessions.values).sorted { $0.projectName < $1.projectName }
+        let publishedSessionIds = Set(logicalBindings.values)
+        let sortedSessions = sessions.values
+            .filter { publishedSessionIds.contains($0.sessionId) }
+            .sorted { lhs, rhs in
+                if lhs.logicalSessionId == rhs.logicalSessionId {
+                    return lhs.lastActivity > rhs.lastActivity
+                }
+                return lhs.projectName < rhs.projectName
+            }
         sessionsSubject.send(sortedSessions)
     }
 

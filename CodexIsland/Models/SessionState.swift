@@ -14,6 +14,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
     // MARK: - Identity
 
     let sessionId: String
+    var logicalSessionId: String
     let provider: SessionProvider
     let cwd: String
     let projectName: String
@@ -70,12 +71,13 @@ struct SessionState: Equatable, Identifiable, Sendable {
 
     // MARK: - Identifiable
 
-    var id: String { sessionId }
+    var id: String { logicalSessionId }
 
     // MARK: - Initialization
 
     nonisolated init(
         sessionId: String,
+        logicalSessionId: String? = nil,
         provider: SessionProvider = .claude,
         cwd: String,
         projectName: String? = nil,
@@ -104,6 +106,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         createdAt: Date = Date()
     ) {
         self.sessionId = sessionId
+        self.logicalSessionId = logicalSessionId ?? sessionId
         self.provider = provider
         self.cwd = cwd
         self.projectName = projectName ?? URL(fileURLWithPath: cwd).lastPathComponent
@@ -148,10 +151,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
 
     /// Stable identity for SwiftUI (combines PID and sessionId for animation stability)
     var stableId: String {
-        if let pid = pid {
-            return "\(pid)-\(sessionId)"
-        }
-        return sessionId
+        logicalSessionId
     }
 
     /// Display title: summary > first user message > project name

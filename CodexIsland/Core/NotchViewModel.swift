@@ -34,7 +34,7 @@ enum NotchContentType: Equatable {
         switch self {
         case .instances: return "instances"
         case .menu: return "menu"
-        case .chat(let session): return "chat-\(session.sessionId)"
+        case .chat(let session): return "chat-\(session.logicalSessionId)"
         case .remoteHosts: return "remote-hosts"
         case .remoteChat(let thread): return "remote-chat-\(thread.stableId)"
         }
@@ -223,7 +223,7 @@ class NotchViewModel: ObservableObject {
         // Restore chat session if we had one open before
         if let chatSession = currentChatSession {
             // Avoid unnecessary updates if already showing this chat
-            if case .chat(let current) = contentType, current.sessionId == chatSession.sessionId {
+            if case .chat(let current) = contentType, current.logicalSessionId == chatSession.logicalSessionId {
                 return
             }
             contentType = .chat(chatSession)
@@ -265,7 +265,7 @@ class NotchViewModel: ObservableObject {
 
     func showChat(for session: SessionState) {
         // Avoid unnecessary updates if already showing this chat
-        if case .chat(let current) = contentType, current.sessionId == session.sessionId {
+        if case .chat(let current) = contentType, current.logicalSessionId == session.logicalSessionId {
             return
         }
         currentRemoteChatThread = nil

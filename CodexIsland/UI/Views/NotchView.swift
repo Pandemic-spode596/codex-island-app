@@ -381,7 +381,7 @@ struct NotchView: View {
                 RemoteHostsView(viewModel: viewModel)
             case .chat(let session):
                 ChatView(
-                    sessionId: session.sessionId,
+                    logicalSessionId: session.logicalSessionId,
                     initialSession: session,
                     sessionMonitor: sessionMonitor,
                     viewModel: viewModel

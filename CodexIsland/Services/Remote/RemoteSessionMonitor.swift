@@ -45,6 +45,7 @@ nonisolated protocol RemoteAppServerConnectionProtocol: Sendable {
     func updateHost(_ host: RemoteHostConfig) async
     func start() async
     func stop() async
+    func normalizeCwd(_ cwd: String) async throws -> String?
     func startThread(defaultCwd: String) async throws -> RemoteAppServerThread
     func resumeThread(threadId: String) async throws -> RemoteAppServerThread
     func sendMessage(threadId: String, text: String, activeTurnId: String?) async throws
@@ -147,6 +148,26 @@ final class RemoteSessionMonitor: ObservableObject {
 
     private func markStateChanged() {
         objectWillChange.send()
+    }
+
+    private func normalizeSSHIdentity(_ sshTarget: String) -> String {
+        sshTarget.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func normalizeCwdIdentity(_ cwd: String) -> String {
+        cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func logicalSessionId(sshTarget: String, cwd: String) -> String {
+        "remote|\(normalizeSSHIdentity(sshTarget))|\(normalizeCwdIdentity(cwd))"
+    }
+
+    private func logicalSessionId(for host: RemoteHostConfig, cwd: String) -> String {
+        logicalSessionId(sshTarget: host.sshTarget, cwd: cwd)
+    }
+
+    private func threadIndex(logicalSessionId: String) -> Int? {
+        threads.firstIndex(where: { $0.logicalSessionId == logicalSessionId })
     }
 
     func startMonitoring() {
@@ -280,6 +301,14 @@ final class RemoteSessionMonitor: ObservableObject {
         }
         guard let connection = connections[hostId] else {
             throw RemoteSessionError.notConnected
+        }
+        let normalizedDefaultCwd = try await connection.normalizeCwd(host.defaultCwd)
+        if let normalizedDefaultCwd,
+           let existingThread = threads.first(where: {
+               $0.hostId == hostId &&
+               $0.logicalSessionId == logicalSessionId(for: host, cwd: normalizedDefaultCwd)
+           }) {
+            return existingThread
         }
         let existingThreadIds = Set(
             threads
@@ -494,11 +523,7 @@ final class RemoteSessionMonitor: ObservableObject {
             }
 
         case .threadList(let hostId, let remoteThreads):
-            let ids = Set(remoteThreads.map(\.id))
-            threads.removeAll { $0.hostId == hostId && !ids.contains($0.threadId) }
-            for thread in remoteThreads {
-                upsertThread(hostId: hostId, thread: thread, replaceHistory: false)
-            }
+            applyThreadList(hostId: hostId, remoteThreads: remoteThreads)
 
         case .threadUpsert(let hostId, let thread):
             upsertThread(hostId: hostId, thread: thread, replaceHistory: !thread.turns.isEmpty)
@@ -575,16 +600,50 @@ final class RemoteSessionMonitor: ObservableObject {
         }
     }
 
+    private func applyThreadList(hostId: String, remoteThreads: [RemoteAppServerThread]) {
+        let host = hosts.first(where: { $0.id == hostId })
+        let groupedThreads = Dictionary(grouping: remoteThreads) { thread in
+            logicalSessionId(
+                sshTarget: host?.sshTarget ?? "",
+                cwd: thread.cwd
+            )
+        }
+
+        let survivingLogicalIds = Set(groupedThreads.keys)
+        threads.removeAll { $0.hostId == hostId && !survivingLogicalIds.contains($0.logicalSessionId) }
+
+        for candidates in groupedThreads.values {
+            guard let latestThread = candidates.max(by: { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt {
+                    return lhs.updatedAt < rhs.updatedAt
+                }
+                return lhs.createdAt < rhs.createdAt
+            }) else {
+                continue
+            }
+            upsertThread(hostId: hostId, thread: latestThread, replaceHistory: !latestThread.turns.isEmpty)
+        }
+    }
+
     private func upsertThread(hostId: String, thread: RemoteAppServerThread, replaceHistory: Bool) {
-        let hostName = hosts.first(where: { $0.id == hostId })?.displayName ?? "Remote Host"
+        let host = hosts.first(where: { $0.id == hostId })
+        let hostName = host?.displayName ?? "Remote Host"
         let connectionState = hostStates[hostId] ?? .disconnected
         let computedHistory = replaceHistory ? historyItems(from: thread.turns) : nil
         let computedTurn = thread.turns.last(where: { $0.status == .inProgress })
+        let logicalSessionId = logicalSessionId(
+            sshTarget: host?.sshTarget ?? "",
+            cwd: thread.cwd
+        )
 
-        if let index = threadIndex(hostId: hostId, threadId: thread.id) {
+        if let index = threadIndex(logicalSessionId: logicalSessionId) {
+            let isRebindingRawThread = threads[index].threadId != thread.id
+            let previousPendingApproval = isRebindingRawThread ? nil : threads[index].pendingApproval
             threads[index].preview = thread.preview
             threads[index].name = thread.name
+            threads[index].logicalSessionId = logicalSessionId
             threads[index].cwd = thread.cwd
+            threads[index].threadId = thread.id
             threads[index].updatedAt = remoteDate(thread.updatedAt)
             threads[index].createdAt = remoteDate(thread.createdAt)
             threads[index].isLoaded = thread.status != .notLoaded
@@ -594,12 +653,20 @@ final class RemoteSessionMonitor: ObservableObject {
                 threads[index].history = computedHistory
                 threads[index].activeTurnId = computedTurn?.id
                 threads[index].canSteerTurn = computedTurn != nil
+                if isRebindingRawThread {
+                    threads[index].pendingApproval = nil
+                }
+            } else if isRebindingRawThread {
+                threads[index].history = []
+                threads[index].activeTurnId = computedTurn?.id
+                threads[index].canSteerTurn = computedTurn != nil
+                threads[index].pendingApproval = nil
             }
 
             updateDerivedFields(at: index)
             threads[index].phase = phase(
                 from: thread.status,
-                pendingApproval: threads[index].pendingApproval,
+                pendingApproval: previousPendingApproval ?? threads[index].pendingApproval,
                 activeTurnId: threads[index].activeTurnId
             )
             return
@@ -609,6 +676,7 @@ final class RemoteSessionMonitor: ObservableObject {
             hostId: hostId,
             hostName: hostName,
             threadId: thread.id,
+            logicalSessionId: logicalSessionId,
             preview: thread.preview,
             name: thread.name,
             cwd: thread.cwd,
@@ -629,7 +697,7 @@ final class RemoteSessionMonitor: ObservableObject {
         )
 
         threads.append(state)
-        if let index = threadIndex(hostId: hostId, threadId: thread.id) {
+        if let index = threadIndex(logicalSessionId: logicalSessionId) {
             updateDerivedFields(at: index)
         }
     }
@@ -1062,6 +1130,10 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
         pendingRequests.removeAll()
         pendingRequestMetadata.removeAll()
         latestStderr = ""
+    }
+
+    func normalizeCwd(_ cwd: String) async throws -> String? {
+        try await normalizeRemoteCwd(cwd)
     }
 
     func startThread(defaultCwd: String) async throws -> RemoteAppServerThread {

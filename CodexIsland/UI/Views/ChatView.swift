@@ -9,7 +9,7 @@ import Combine
 import SwiftUI
 
 struct ChatView: View {
-    let sessionId: String
+    let logicalSessionId: String
     let initialSession: SessionState
     let sessionMonitor: CodexSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
@@ -26,15 +26,15 @@ struct ChatView: View {
     @State private var isBottomVisible: Bool = true
     @FocusState private var isInputFocused: Bool
 
-    init(sessionId: String, initialSession: SessionState, sessionMonitor: CodexSessionMonitor, viewModel: NotchViewModel) {
-        self.sessionId = sessionId
+    init(logicalSessionId: String, initialSession: SessionState, sessionMonitor: CodexSessionMonitor, viewModel: NotchViewModel) {
+        self.logicalSessionId = logicalSessionId
         self.initialSession = initialSession
         self.sessionMonitor = sessionMonitor
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._session = State(initialValue: initialSession)
 
         // Initialize from cache if available (prevents loading flicker on view recreation)
-        let cachedHistory = ChatHistoryManager.shared.history(for: sessionId)
+        let cachedHistory = ChatHistoryManager.shared.history(for: logicalSessionId)
         let alreadyLoaded = !cachedHistory.isEmpty
         self._history = State(initialValue: cachedHistory)
         self._isLoading = State(initialValue: !alreadyLoaded)
@@ -97,15 +97,19 @@ struct ChatView: View {
             hasLoadedOnce = true
 
             // Check if already loaded (from previous visit)
-            if ChatHistoryManager.shared.isLoaded(sessionId: sessionId) {
-                history = ChatHistoryManager.shared.history(for: sessionId)
+            if ChatHistoryManager.shared.isLoaded(logicalSessionId: logicalSessionId) {
+                history = ChatHistoryManager.shared.history(for: logicalSessionId)
                 isLoading = false
                 return
             }
 
             // Load in background, show loading state
-            await ChatHistoryManager.shared.loadFromFile(sessionId: sessionId, cwd: session.cwd)
-            history = ChatHistoryManager.shared.history(for: sessionId)
+            await ChatHistoryManager.shared.loadFromFile(
+                logicalSessionId: logicalSessionId,
+                sessionId: session.sessionId,
+                cwd: session.cwd
+            )
+            history = ChatHistoryManager.shared.history(for: logicalSessionId)
 
             withAnimation(.easeOut(duration: 0.2)) {
                 isLoading = false
@@ -113,7 +117,7 @@ struct ChatView: View {
         }
         .onReceive(ChatHistoryManager.shared.$histories) { histories in
             // Update when count changes, last item differs, or content changes (e.g., tool status)
-            if let newHistory = histories[sessionId] {
+            if let newHistory = histories[logicalSessionId] {
                 let countChanged = newHistory.count != history.count
                 let lastItemChanged = newHistory.last?.id != history.last?.id
                 // Always update - the @Published ensures we only get notified on real changes
@@ -144,7 +148,7 @@ struct ChatView: View {
             }
         }
         .onReceive(sessionMonitor.$instances) { sessions in
-            if let updated = sessions.first(where: { $0.sessionId == sessionId }),
+            if let updated = sessions.first(where: { $0.logicalSessionId == logicalSessionId }),
                updated != session {
                 // Check if permission was just accepted (transition from waitingForApproval to processing)
                 let wasWaiting = isWaitingForApproval
@@ -292,7 +296,7 @@ struct ChatView: View {
                     }
 
                     ForEach(history.reversed()) { item in
-                        MessageItemView(item: item, sessionId: sessionId)
+                        MessageItemView(item: item, sessionId: logicalSessionId)
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
                             .transition(.asymmetric(
@@ -504,11 +508,11 @@ struct ChatView: View {
     }
 
     private func approvePermission() {
-        sessionMonitor.approvePermission(sessionId: sessionId)
+        sessionMonitor.approvePermission(sessionId: session.sessionId)
     }
 
     private func denyPermission() {
-        sessionMonitor.denyPermission(sessionId: sessionId, reason: nil)
+        sessionMonitor.denyPermission(sessionId: session.sessionId, reason: nil)
     }
 
     private func sendMessage() {

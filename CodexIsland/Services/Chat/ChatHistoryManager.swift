@@ -27,17 +27,17 @@ class ChatHistoryManager: ObservableObject {
 
     // MARK: - Public API
 
-    func history(for sessionId: String) -> [ChatHistoryItem] {
-        histories[sessionId] ?? []
+    func history(for logicalSessionId: String) -> [ChatHistoryItem] {
+        histories[logicalSessionId] ?? []
     }
 
-    func isLoaded(sessionId: String) -> Bool {
-        loadedSessions.contains(sessionId)
+    func isLoaded(logicalSessionId: String) -> Bool {
+        loadedSessions.contains(logicalSessionId)
     }
 
-    func loadFromFile(sessionId: String, cwd: String) async {
-        guard !loadedSessions.contains(sessionId) else { return }
-        loadedSessions.insert(sessionId)
+    func loadFromFile(logicalSessionId: String, sessionId: String, cwd: String) async {
+        guard !loadedSessions.contains(logicalSessionId) else { return }
+        loadedSessions.insert(logicalSessionId)
         await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
     }
 
@@ -61,11 +61,13 @@ class ChatHistoryManager: ObservableObject {
         await SessionStore.shared.process(.fileUpdated(payload))
     }
 
-    func clearHistory(for sessionId: String) {
-        loadedSessions.remove(sessionId)
-        histories.removeValue(forKey: sessionId)
+    func clearHistory(for logicalSessionId: String, sessionId: String?) {
+        loadedSessions.remove(logicalSessionId)
+        histories.removeValue(forKey: logicalSessionId)
         Task {
-            await SessionStore.shared.process(.sessionEnded(sessionId: sessionId))
+            if let sessionId {
+                await SessionStore.shared.process(.sessionEnded(sessionId: sessionId))
+            }
         }
     }
 
@@ -76,9 +78,9 @@ class ChatHistoryManager: ObservableObject {
         var newAgentDescriptions: [String: [String: String]] = [:]
         for session in sessions {
             let filteredItems = filterOutSubagentTools(session.chatItems)
-            newHistories[session.sessionId] = filteredItems
-            newAgentDescriptions[session.sessionId] = session.subagentState.agentDescriptions
-            loadedSessions.insert(session.sessionId)
+            newHistories[session.logicalSessionId] = filteredItems
+            newAgentDescriptions[session.logicalSessionId] = session.subagentState.agentDescriptions
+            loadedSessions.insert(session.logicalSessionId)
         }
         histories = newHistories
         agentDescriptions = newAgentDescriptions

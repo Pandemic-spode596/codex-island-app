@@ -171,7 +171,7 @@ private struct RemoteHostCard: View {
                 .disabled(!draft.isValid || state == .connecting)
 
                 if state.isConnected {
-                    Button(isStartingThread ? "Starting..." : "New Thread") {
+                    Button(isStartingThread ? "Opening..." : "Open Session") {
                         onStartThread()
                     }
                     .buttonStyle(.plain)

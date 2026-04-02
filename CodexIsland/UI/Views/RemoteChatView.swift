@@ -168,7 +168,7 @@ struct RemoteChatView: View {
                         .id("bottom")
 
                     ForEach(history.reversed()) { item in
-                        MessageItemView(item: item, sessionId: thread.threadId)
+                        MessageItemView(item: item, sessionId: thread.logicalSessionId)
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
                     }
