@@ -114,7 +114,7 @@ struct NotchMenuView: View {
                 label: "Quit",
                 isDestructive: true
             ) {
-                NSApplication.shared.terminate(nil)
+                AppDelegate.shared?.requestQuit()
             }
         }
         .padding(.horizontal, 8)

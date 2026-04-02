@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import IOKit
 import Mixpanel
 import Sparkle
@@ -8,6 +9,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowManager: WindowManager?
     private var screenObserver: ScreenObserver?
     private var updateCheckTimer: Timer?
+    private var quitFallbackWorkItem: DispatchWorkItem?
     private let isRunningTests = Foundation.ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     static var shared: AppDelegate?
@@ -99,8 +101,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         _ = windowManager?.setupNotchWindow()
     }
 
+    func requestQuit() {
+        quitFallbackWorkItem?.cancel()
+
+        let fallback = DispatchWorkItem {
+            exit(0)
+        }
+        quitFallbackWorkItem = fallback
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: fallback)
+        NSApplication.shared.terminate(nil)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         guard !isRunningTests else { return }
+        quitFallbackWorkItem?.cancel()
         Mixpanel.mainInstance().flush()
         updateCheckTimer?.invalidate()
         screenObserver = nil
