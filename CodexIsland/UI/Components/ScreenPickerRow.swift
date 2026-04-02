@@ -48,12 +48,14 @@ struct ScreenPickerRow: View {
                         .font(.system(size: 10))
                         .foregroundColor(.white.opacity(0.4))
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
                         .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
                 )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { isHovered = $0 }
@@ -173,12 +175,14 @@ private struct ScreenOptionRow: View {
                         .foregroundColor(TerminalColors.green)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }

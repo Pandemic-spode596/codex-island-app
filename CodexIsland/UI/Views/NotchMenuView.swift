@@ -186,12 +186,14 @@ struct UpdateRow: View {
                 // Right side: progress or status
                 rightContent
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(isHovered && isInteractive ? Color.white.opacity(0.08) : Color.clear)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!isInteractive)
@@ -430,12 +432,14 @@ struct AccessibilityRow: View {
                 .buttonStyle(.plain)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
         )
+        .contentShape(Rectangle())
         .onHover { isHovered = $0 }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshTrigger.toggle()
@@ -475,12 +479,14 @@ struct MenuRow: View {
 
                 Spacer()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
@@ -524,12 +530,14 @@ struct MenuToggleRow: View {
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.4))
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
