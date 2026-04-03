@@ -558,6 +558,12 @@ actor CodexConversationParser {
             }
 
         case "request_user_input":
+            if let interaction = parseRequestUserInputEvent(payload: payload) {
+                pendingInteractions[interaction.id] = interaction
+                if !pendingInteractionOrder.contains(interaction.id) {
+                    pendingInteractionOrder.append(interaction.id)
+                }
+            }
             transcriptPhase = .waitingForInput
 
         case "turn_complete", "task_complete", "turn_aborted":
@@ -731,6 +737,28 @@ actor CodexConversationParser {
             requestedPermissions: parsePermissionProfile(payload["permissions"] as? [String: Any]),
             availableActions: [.allow, .allowForSession, .deny],
             transport: .codexLocal(callId: callId, turnId: payload["turn_id"] as? String)
+        ))
+    }
+
+    private func parseRequestUserInputEvent(payload: [String: Any]) -> PendingInteraction? {
+        let callId = payload["call_id"] as? String ??
+            payload["item_id"] as? String ??
+            payload["itemId"] as? String ??
+            payload["request_id"] as? String ??
+            payload["requestId"] as? String
+        guard let callId,
+              let questions = parseInteractionQuestions(payload["questions"] as? [[String: Any]]),
+              !questions.isEmpty else {
+            return nil
+        }
+
+        let turnId = payload["turn_id"] as? String ?? payload["turnId"] as? String
+
+        return .userInput(PendingUserInputInteraction(
+            id: callId,
+            title: "Codex needs your input",
+            questions: questions,
+            transport: .codexLocal(callId: callId, turnId: turnId)
         ))
     }
 
