@@ -173,7 +173,9 @@ struct ReadyForInputIndicatorIcon: View {
 struct ClosedStatusSummaryView: View {
     static let itemWidth: CGFloat = 28
     static let itemSpacing: CGFloat = 6
-    static let preferredWidth: CGFloat = itemWidth * 3 + itemSpacing * 2
+    static let leadingInset: CGFloat = 10
+    static let trailingInset: CGFloat = 4
+    static let preferredWidth: CGFloat = leadingInset + trailingInset + itemWidth * 3 + itemSpacing * 2
 
     let summary: SessionPhaseSummary
 
@@ -183,6 +185,8 @@ struct ClosedStatusSummaryView: View {
             summaryItem(color: TerminalColors.amber, count: summary.waitingCount)
             summaryItem(color: TerminalColors.green, count: summary.idleCount)
         }
+        .padding(.leading, Self.leadingInset)
+        .padding(.trailing, Self.trailingInset)
         .frame(width: Self.preferredWidth, alignment: .trailing)
     }
 
