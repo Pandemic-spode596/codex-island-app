@@ -227,6 +227,210 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertEqual(capturedThreadId, hiddenThreadId)
     }
 
+    @MainActor
+    func testLocalListModelsUsesAppServerConnection() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let includeHiddenFlag = LockedBox<Bool?>(nil)
+        connection.listModelsHandler = { includeHidden in
+            await includeHiddenFlag.set(includeHidden)
+            return [
+                RemoteAppServerModel(
+                    id: "gpt-5.4",
+                    model: "gpt-5.4",
+                    displayName: "GPT-5.4",
+                    description: "Flagship",
+                    hidden: false,
+                    supportedReasoningEfforts: [
+                        RemoteAppServerReasoningEffortOption(
+                            reasoningEffort: .medium,
+                            description: "Balanced"
+                        )
+                    ],
+                    defaultReasoningEffort: .medium,
+                    isDefault: true
+                )
+            ]
+        }
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+        await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
+        await Task.yield()
+
+        localMonitor.apply(event: .threadUpsert(
+            hostId: host.id,
+            thread: makeThread(id: "session-1", status: .idle)
+        ))
+        await Task.yield()
+
+        let models = try await sessionMonitor.listLocalModels(sessionId: "session-1", includeHidden: true)
+        let capturedIncludeHidden = await includeHiddenFlag.get()
+
+        XCTAssertEqual(capturedIncludeHidden, true)
+        XCTAssertEqual(models.count, 1)
+        XCTAssertEqual(models.first?.model, "gpt-5.4")
+    }
+
+    @MainActor
+    func testLocalSetTurnContextUsesAppServerThread() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let capturedContext = LockedBox<RemoteThreadTurnContext?>(nil)
+        connection.resumeThreadHandler = { threadId, turnContext in
+            XCTAssertEqual(threadId, "session-1")
+            await capturedContext.set(turnContext)
+            return await makeThreadResumeResponse(
+                thread: makeThread(id: "session-1", status: .idle),
+                model: turnContext?.model ?? "gpt-5.4",
+                approvalPolicy: turnContext?.approvalPolicy ?? .onRequest,
+                approvalsReviewer: turnContext?.approvalsReviewer ?? .user,
+                sandbox: turnContext?.sandboxPolicy ?? .workspaceWrite(),
+                reasoningEffort: turnContext?.reasoningEffort ?? .high
+            )
+        }
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+        await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
+        await Task.yield()
+
+        localMonitor.apply(event: .threadUpsert(
+            hostId: host.id,
+            thread: makeThread(id: "session-1", status: .idle)
+        ))
+        await Task.yield()
+
+        let desiredContext = RemoteThreadTurnContext(
+            model: "gpt-5.5",
+            reasoningEffort: .high,
+            approvalPolicy: .never,
+            approvalsReviewer: .user,
+            sandboxPolicy: .dangerFullAccess,
+            serviceTier: nil,
+            collaborationMode: RemoteAppServerCollaborationMode(
+                mode: .plan,
+                settings: RemoteAppServerCollaborationSettings(
+                    developerInstructions: nil,
+                    model: "gpt-5.5",
+                    reasoningEffort: .high
+                )
+            )
+        )
+
+        let updatedThread = try await sessionMonitor.setLocalTurnContext(
+            sessionId: "session-1",
+            turnContext: desiredContext,
+            synchronizeThread: true
+        )
+        let observedContext = await capturedContext.get()
+
+        XCTAssertEqual(observedContext, desiredContext)
+        XCTAssertEqual(updatedThread.currentModel, "gpt-5.5")
+        XCTAssertEqual(updatedThread.turnContext.approvalPolicy, .never)
+        XCTAssertEqual(updatedThread.turnContext.sandboxPolicy, .dangerFullAccess)
+        XCTAssertEqual(updatedThread.turnContext.collaborationMode?.mode, .plan)
+    }
+
+    @MainActor
+    func testLocalListCollaborationModesUsesAppServerConnection() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        connection.listCollaborationModesHandler = {
+            [
+                RemoteAppServerCollaborationModeMask(
+                    name: "Default",
+                    mode: .default,
+                    model: "gpt-5.4",
+                    reasoningEffort: .medium
+                ),
+                RemoteAppServerCollaborationModeMask(
+                    name: "Plan",
+                    mode: .plan,
+                    model: "gpt-5.4",
+                    reasoningEffort: .high
+                )
+            ]
+        }
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+        await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
+        await Task.yield()
+
+        localMonitor.apply(event: .threadUpsert(
+            hostId: host.id,
+            thread: makeThread(id: "session-1", status: .idle)
+        ))
+        await Task.yield()
+
+        let modes = try await sessionMonitor.listLocalCollaborationModes(sessionId: "session-1")
+
+        XCTAssertEqual(modes.count, 2)
+        XCTAssertEqual(modes.last?.mode, .plan)
+        XCTAssertEqual(modes.last?.reasoningEffort, .high)
+    }
+
     private func makeInteraction(questions: [PendingInteractionQuestion]) -> PendingUserInputInteraction {
         PendingUserInputInteraction(
             id: "call-1",

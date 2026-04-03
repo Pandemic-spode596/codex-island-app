@@ -8,6 +8,105 @@
 import Combine
 import SwiftUI
 
+private enum LocalChatSubmitAction: Equatable {
+    case send(String)
+    case command(LocalSlashCommand, args: String?)
+    case rejectSlashCommand(String)
+}
+
+private enum LocalSlashCommand: String, CaseIterable, Identifiable {
+    case plan = "/plan"
+    case model = "/model"
+    case permissions = "/permissions"
+
+    var id: String { rawValue }
+
+    var title: String { rawValue }
+
+    var bareName: String {
+        String(rawValue.dropFirst())
+    }
+
+    var description: String {
+        switch self {
+        case .plan:
+            return "切到 Plan mode"
+        case .model:
+            return "选择模型与 reasoning"
+        case .permissions:
+            return "选择权限 preset"
+        }
+    }
+
+    var supportsInlineArgs: Bool {
+        self == .plan
+    }
+
+    static func matches(for text: String) -> [LocalSlashCommand] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return [] }
+        let token = String(trimmed.dropFirst()).split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        if token.isEmpty {
+            return allCases
+        }
+        return allCases.filter { $0.bareName.hasPrefix(token.lowercased()) }
+    }
+
+    static func submitAction(for text: String) -> LocalChatSubmitAction? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("/") {
+            let commandBody = String(trimmed.dropFirst())
+            let parts = commandBody.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            guard let first = parts.first else { return nil }
+            let name = String(first)
+            let args = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            if let command = allCases.first(where: { $0.bareName == name }) {
+                return .command(command, args: args?.isEmpty == true ? nil : args)
+            }
+            return .rejectSlashCommand("Unsupported local command: \(trimmed)")
+        }
+        return .send(trimmed)
+    }
+}
+
+private enum LocalSlashPanel: Equatable {
+    case model
+    case permissions
+}
+
+private struct LocalApprovalPreset: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let description: String
+    let approvalPolicy: RemoteAppServerApprovalPolicy
+    let sandboxPolicy: RemoteAppServerSandboxPolicy
+
+    static let builtIn: [LocalApprovalPreset] = [
+        LocalApprovalPreset(
+            id: "read-only",
+            label: "Read Only",
+            description: "Codex can read files in the current workspace. Approval is required to edit files or access the internet.",
+            approvalPolicy: .onRequest,
+            sandboxPolicy: .readOnly()
+        ),
+        LocalApprovalPreset(
+            id: "auto",
+            label: "Default",
+            description: "Codex can read and edit files in the current workspace, and run commands. Approval is required to access the internet or edit other files.",
+            approvalPolicy: .onRequest,
+            sandboxPolicy: .workspaceWrite()
+        ),
+        LocalApprovalPreset(
+            id: "full-access",
+            label: "Full Access",
+            description: "Codex can edit files outside this workspace and access the internet without asking for approval.",
+            approvalPolicy: .never,
+            sandboxPolicy: .dangerFullAccess
+        )
+    ]
+}
+
 struct ChatView: View {
     let logicalSessionId: String
     let sessionMonitor: CodexSessionMonitor
@@ -24,6 +123,12 @@ struct ChatView: View {
     @State private var newMessageCount: Int = 0
     @State private var previousHistoryCount: Int = 0
     @State private var isBottomVisible: Bool = true
+    @State private var activeSlashPanel: LocalSlashPanel?
+    @State private var slashFeedbackMessage: String?
+    @State private var isSlashPanelLoading = false
+    @State private var isExecutingSlashAction = false
+    @State private var availableModels: [RemoteAppServerModel] = []
+    @State private var selectedModelForEffort: RemoteAppServerModel?
     @FocusState private var isInputFocused: Bool
 
     init(logicalSessionId: String, initialSession: SessionState, sessionMonitor: CodexSessionMonitor, viewModel: NotchViewModel) {
@@ -48,6 +153,19 @@ struct ChatView: View {
 
     private var hasPendingInteraction: Bool {
         pendingInteraction != nil
+    }
+
+    private var localAppServerThread: RemoteThreadState? {
+        sessionMonitor.localAppServerThreads[session.sessionId]
+    }
+
+    private var matchingSlashCommands: [LocalSlashCommand] {
+        guard activeSlashPanel == nil else { return [] }
+        return LocalSlashCommand.matches(for: inputText)
+    }
+
+    private var isPlanModeActive: Bool {
+        localAppServerThread?.turnContext.collaborationMode?.mode == .plan
     }
 
     private var trimmedInputText: String {
@@ -95,7 +213,7 @@ struct ChatView: View {
                         removal: .opacity
                     ))
                 } else {
-                    inputBar
+                    composer
                         .transition(.opacity)
                 }
             }
@@ -191,6 +309,12 @@ struct ChatView: View {
                 }
             }
         }
+        .onChange(of: inputText) { _, newValue in
+            if activeSlashPanel == nil,
+               !newValue.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
+                slashFeedbackMessage = nil
+            }
+        }
     }
 
     // MARK: - Header
@@ -208,10 +332,22 @@ struct ChatView: View {
                     .frame(width: 24, height: 24)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(session.displayTitle)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(session.displayTitle)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
+                            .lineLimit(1)
+
+                        if isPlanModeActive {
+                            Text("PLAN MODE")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundColor(.black.opacity(0.9))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(TerminalColors.amber.opacity(0.95))
+                                .clipShape(Capsule())
+                        }
+                    }
 
                     SessionStatusStrip(
                         model: session.currentModel,
@@ -395,6 +531,9 @@ struct ChatView: View {
 
     private var messagingPromptText: String {
         if canSendMessages {
+            if isPlanModeActive {
+                return "Message Codex in Plan Mode..."
+            }
             return "Message Codex..."
         }
 
@@ -403,6 +542,48 @@ struct ChatView: View {
         }
 
         return "Waiting for Codex app-server"
+    }
+
+    private var composer: some View {
+        VStack(spacing: 8) {
+            if isPlanModeActive {
+                planModeBanner
+            }
+
+            if let activeSlashPanel {
+                slashPanel(activeSlashPanel)
+            } else if !matchingSlashCommands.isEmpty {
+                slashSuggestionsPanel
+            }
+
+            if let slashFeedbackMessage, !slashFeedbackMessage.isEmpty {
+                slashFeedbackBanner(message: slashFeedbackMessage)
+            }
+
+            inputBar
+        }
+    }
+
+    private var planModeBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "list.bullet.clipboard")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(TerminalColors.amber)
+
+            Text("Plan Mode active. `/plan` again will switch back to Default mode.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.72))
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.06))
+        )
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
     }
 
     private var inputBar: some View {
@@ -424,11 +605,11 @@ struct ChatView: View {
                             )
                     )
                     .onSubmit {
-                        sendMessage()
+                        handleSubmit()
                     }
 
                 Button {
-                    sendMessage()
+                    handleSubmit()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 28))
@@ -494,6 +675,286 @@ struct ChatView: View {
         .zIndex(1) // Render above message list
     }
 
+    private var slashSuggestionsPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Codex commands")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white.opacity(0.7))
+
+            ForEach(matchingSlashCommands) { command in
+                Button {
+                    handleSlashCommand(command, args: nil)
+                } label: {
+                    HStack(spacing: 10) {
+                        Text(command.title)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.9))
+                        Text(command.description)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.45))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.white.opacity(0.05))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+
+    private func slashFeedbackBanner(message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10))
+                .foregroundColor(TerminalColors.amber)
+
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.7))
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.06))
+        )
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private func slashPanel(_ panel: LocalSlashPanel) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(title(for: panel))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.92))
+                Text(subtitle(for: panel))
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.45))
+                Spacer()
+                Button {
+                    dismissSlashPanel()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.35))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isSlashPanelLoading {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading…")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.55))
+                }
+                .padding(.vertical, 8)
+            } else {
+                switch panel {
+                case .model:
+                    modelPanelContent
+                case .permissions:
+                    permissionsPanelContent
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+    }
+
+    private var modelPanelContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let selectedModelForEffort {
+                Text("Choose reasoning effort for \(selectedModelForEffort.displayName)")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.45))
+
+                ForEach(selectedModelForEffort.supportedReasoningEfforts, id: \.reasoningEffort) { option in
+                    slashActionButton(
+                        option.reasoningEffort.rawValue,
+                        note: option.description
+                    ) {
+                        await applyModelSelection(
+                            model: selectedModelForEffort,
+                            effort: option.reasoningEffort
+                        )
+                    }
+                }
+
+                slashActionButton("Use default", note: selectedModelForEffort.defaultReasoningEffort.rawValue) {
+                    await applyModelSelection(
+                        model: selectedModelForEffort,
+                        effort: selectedModelForEffort.defaultReasoningEffort
+                    )
+                }
+
+                Button("Back") {
+                    self.selectedModelForEffort = nil
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.55))
+                .padding(.top, 4)
+            } else if availableModels.isEmpty {
+                Text("No models available")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.45))
+            } else {
+                ForEach(availableModels, id: \.id) { model in
+                    let isCurrent = model.model == (localAppServerThread?.currentModel ?? session.currentModel)
+                    Button {
+                        if model.supportedReasoningEfforts.count <= 1 {
+                            Task {
+                                await applyModelSelection(
+                                    model: model,
+                                    effort: model.defaultReasoningEffort
+                                )
+                            }
+                        } else {
+                            selectedModelForEffort = model
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(model.displayName)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.88))
+                                if isCurrent {
+                                    Text("Current")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundColor(.black)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.white.opacity(0.85))
+                                        .clipShape(Capsule())
+                                }
+                                Spacer()
+                                Text(model.defaultReasoningEffort.rawValue)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.35))
+                            }
+                            Text(model.description)
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.4))
+                                .lineLimit(2)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color.white.opacity(0.05))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isExecutingSlashAction)
+                }
+            }
+        }
+    }
+
+    private var permissionsPanelContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(LocalApprovalPreset.builtIn) { preset in
+                let currentContext = localAppServerThread?.turnContext
+                let isCurrent = currentContext?.approvalPolicy == preset.approvalPolicy &&
+                    currentContext?.sandboxPolicy == preset.sandboxPolicy
+                Button {
+                    Task {
+                        await applyPermissionPreset(preset)
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text(preset.label)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.white.opacity(0.88))
+                            if isCurrent {
+                                Text("Current")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.black)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.85))
+                                    .clipShape(Capsule())
+                            }
+                            Spacer()
+                        }
+                        Text(preset.description)
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.4))
+                            .lineLimit(3)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color.white.opacity(0.05))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isExecutingSlashAction)
+            }
+        }
+    }
+
+    private func title(for panel: LocalSlashPanel) -> String {
+        switch panel {
+        case .model:
+            return "/model"
+        case .permissions:
+            return "/permissions"
+        }
+    }
+
+    private func subtitle(for panel: LocalSlashPanel) -> String {
+        switch panel {
+        case .model:
+            return "Choose what model and reasoning effort to use."
+        case .permissions:
+            return "Choose what Codex is allowed to do."
+        }
+    }
+
+    private func slashActionButton(
+        _ title: String,
+        note: String,
+        action: @escaping () async -> Void
+    ) -> some View {
+        Button {
+            Task {
+                await action()
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.88))
+                Text(note)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.4))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(0.05))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isExecutingSlashAction)
+    }
+
     // MARK: - Autoscroll Management
 
     /// Pause autoscroll (user scrolled away from bottom)
@@ -528,12 +989,22 @@ struct ChatView: View {
         return await sessionMonitor.respond(sessionId: latestSession.sessionId, answers: answers)
     }
 
-    private func sendMessage() {
-        let text = trimmedInputText
-        guard !text.isEmpty, !isSending else { return }
+    private func handleSubmit() {
+        guard !trimmedInputText.isEmpty, !isSending else { return }
 
-        Task {
-            await attemptSendMessage(text)
+        guard let action = LocalSlashCommand.submitAction(for: inputText) else { return }
+
+        switch action {
+        case .send(let text):
+            Task {
+                await attemptSendMessage(text)
+            }
+
+        case .command(let command, let args):
+            handleSlashCommand(command, args: args)
+
+        case .rejectSlashCommand(let message):
+            slashFeedbackMessage = message
         }
     }
 
@@ -579,8 +1050,42 @@ struct ChatView: View {
 
         inputText = ""
         sendFailureMessage = nil
+        slashFeedbackMessage = nil
+        dismissSlashPanel()
         resumeAutoscroll()
         shouldScrollToBottom = true
+    }
+
+    private func handleSlashCommand(_ command: LocalSlashCommand, args: String?) {
+        guard canSendMessages else {
+            slashFeedbackMessage = "Waiting for Codex app-server"
+            return
+        }
+
+        if args != nil && !command.supportsInlineArgs {
+            slashFeedbackMessage = "Usage: \(command.rawValue)"
+            return
+        }
+
+        inputText = ""
+        resumeAutoscroll()
+        sendFailureMessage = nil
+        slashFeedbackMessage = nil
+
+        switch command {
+        case .plan:
+            Task {
+                await activatePlanMode(andSubmit: args)
+            }
+        case .model:
+            activeSlashPanel = .model
+            selectedModelForEffort = nil
+            Task {
+                await loadModels()
+            }
+        case .permissions:
+            activeSlashPanel = .permissions
+        }
     }
 
     private func sendToSession(_ text: String) async -> Bool {
@@ -593,6 +1098,259 @@ struct ChatView: View {
 
     private func latestSession() -> SessionState? {
         sessionMonitor.instances.first(where: { $0.logicalSessionId == logicalSessionId }) ?? session
+    }
+
+    private func dismissSlashPanel() {
+        activeSlashPanel = nil
+        selectedModelForEffort = nil
+        isSlashPanelLoading = false
+    }
+
+    private func loadModels() async {
+        guard let latestSession = latestSession() else { return }
+
+        await MainActor.run {
+            isSlashPanelLoading = true
+            availableModels = []
+            selectedModelForEffort = nil
+        }
+
+        do {
+            let models = try await sessionMonitor.listLocalModels(
+                sessionId: latestSession.sessionId,
+                includeHidden: true
+            )
+            await MainActor.run {
+                availableModels = displayModels(from: models)
+                isSlashPanelLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                isSlashPanelLoading = false
+                activeSlashPanel = nil
+                slashFeedbackMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func displayModels(from models: [RemoteAppServerModel]) -> [RemoteAppServerModel] {
+        let currentModel = localAppServerThread?.currentModel ?? session.currentModel
+        var visibleModels = models.filter { !$0.hidden }
+
+        if let currentModel,
+           !visibleModels.contains(where: { $0.model == currentModel }) {
+            if let existingCurrent = models.first(where: { $0.model == currentModel }) {
+                visibleModels.insert(existingCurrent, at: 0)
+            } else {
+                visibleModels.insert(syntheticCurrentModel(named: currentModel), at: 0)
+            }
+        }
+
+        return visibleModels
+    }
+
+    private func syntheticCurrentModel(named model: String) -> RemoteAppServerModel {
+        let effort = localAppServerThread?.currentReasoningEffort ?? .medium
+        return RemoteAppServerModel(
+            id: "current-\(model)",
+            model: model,
+            displayName: model.uppercased(),
+            description: "Current session model",
+            hidden: false,
+            supportedReasoningEfforts: [
+                RemoteAppServerReasoningEffortOption(
+                    reasoningEffort: effort,
+                    description: "Current session reasoning effort"
+                )
+            ],
+            defaultReasoningEffort: effort,
+            isDefault: false
+        )
+    }
+
+    private func activatePlanMode(andSubmit args: String?) async {
+        guard let latestSession = latestSession() else { return }
+
+        await MainActor.run {
+            isExecutingSlashAction = true
+        }
+        defer {
+            Task { @MainActor in
+                isExecutingSlashAction = false
+            }
+        }
+
+        do {
+            let currentThread = try await sessionMonitor.requireLocalAppServerThread(sessionId: latestSession.sessionId)
+            let modes = try await sessionMonitor.listLocalCollaborationModes(sessionId: latestSession.sessionId)
+            let planMask = modes.first(where: { $0.mode == .plan })
+            let defaultMask = modes.first(where: { $0.mode == .default })
+            let currentContext = currentThread.turnContext
+            let togglingOff = args == nil && isPlanModeActive
+
+            if togglingOff {
+                let effectiveModel = currentContext.effectiveModel ?? currentContext.model
+                guard let effectiveModel else {
+                    await MainActor.run {
+                        slashFeedbackMessage = "Default mode is unavailable right now."
+                    }
+                    return
+                }
+
+                let effectiveEffort = currentContext.effectiveReasoningEffort ?? currentContext.reasoningEffort
+                var updatedContext = currentContext
+                updatedContext.model = defaultMask?.model ?? effectiveModel
+                updatedContext.reasoningEffort = defaultMask?.reasoningEffort ?? effectiveEffort
+                updatedContext.collaborationMode = RemoteAppServerCollaborationMode(
+                    mode: .default,
+                    settings: RemoteAppServerCollaborationSettings(
+                        developerInstructions: nil,
+                        model: updatedContext.model ?? effectiveModel,
+                        reasoningEffort: updatedContext.reasoningEffort
+                    )
+                )
+
+                _ = try await sessionMonitor.setLocalTurnContext(
+                    sessionId: latestSession.sessionId,
+                    turnContext: updatedContext,
+                    synchronizeThread: false
+                )
+
+                await MainActor.run {
+                    slashFeedbackMessage = "Plan mode disabled. Default mode will be used for the next turn."
+                }
+                return
+            }
+
+            let planModel = planMask?.model ?? currentContext.effectiveModel ?? currentContext.model
+            let planEffort = planMask?.reasoningEffort ?? currentContext.effectiveReasoningEffort ?? currentContext.reasoningEffort
+
+            guard let planModel else {
+                await MainActor.run {
+                    slashFeedbackMessage = "Plan mode is unavailable right now."
+                }
+                return
+            }
+
+            var updatedContext = currentContext
+            updatedContext.model = planModel
+            updatedContext.reasoningEffort = planEffort
+            updatedContext.collaborationMode = RemoteAppServerCollaborationMode(
+                mode: .plan,
+                settings: RemoteAppServerCollaborationSettings(
+                    developerInstructions: nil,
+                    model: planModel,
+                    reasoningEffort: planEffort
+                )
+            )
+
+            _ = try await sessionMonitor.setLocalTurnContext(
+                sessionId: latestSession.sessionId,
+                turnContext: updatedContext,
+                synchronizeThread: false
+            )
+
+            await MainActor.run {
+                slashFeedbackMessage = args == nil ? "Plan mode enabled." : nil
+            }
+
+            if let args, !args.isEmpty {
+                let sent = await sessionMonitor.sendMessage(sessionId: latestSession.sessionId, text: args)
+                if !sent {
+                    await MainActor.run {
+                        slashFeedbackMessage = "Session is still initializing. Please try again."
+                    }
+                }
+            }
+        } catch {
+            await MainActor.run {
+                slashFeedbackMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func applyModelSelection(
+        model: RemoteAppServerModel,
+        effort: RemoteAppServerReasoningEffort
+    ) async {
+        guard let latestSession = latestSession() else { return }
+
+        await MainActor.run {
+            isExecutingSlashAction = true
+        }
+        defer {
+            Task { @MainActor in
+                isExecutingSlashAction = false
+            }
+        }
+
+        do {
+            let currentThread = try await sessionMonitor.requireLocalAppServerThread(sessionId: latestSession.sessionId)
+            var updatedContext = currentThread.turnContext
+            updatedContext.model = model.model
+            updatedContext.reasoningEffort = effort
+            if let collaborationMode = updatedContext.collaborationMode {
+                updatedContext.collaborationMode = RemoteAppServerCollaborationMode(
+                    mode: collaborationMode.mode,
+                    settings: RemoteAppServerCollaborationSettings(
+                        developerInstructions: collaborationMode.settings.developerInstructions,
+                        model: model.model,
+                        reasoningEffort: effort
+                    )
+                )
+            }
+
+            _ = try await sessionMonitor.setLocalTurnContext(
+                sessionId: latestSession.sessionId,
+                turnContext: updatedContext,
+                synchronizeThread: true
+            )
+
+            await MainActor.run {
+                dismissSlashPanel()
+                slashFeedbackMessage = nil
+            }
+        } catch {
+            await MainActor.run {
+                slashFeedbackMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func applyPermissionPreset(_ preset: LocalApprovalPreset) async {
+        guard let latestSession = latestSession() else { return }
+
+        await MainActor.run {
+            isExecutingSlashAction = true
+        }
+        defer {
+            Task { @MainActor in
+                isExecutingSlashAction = false
+            }
+        }
+
+        do {
+            let currentThread = try await sessionMonitor.requireLocalAppServerThread(sessionId: latestSession.sessionId)
+            var updatedContext = currentThread.turnContext
+            updatedContext.approvalPolicy = preset.approvalPolicy
+            updatedContext.approvalsReviewer = .user
+            updatedContext.sandboxPolicy = preset.sandboxPolicy
+
+            _ = try await sessionMonitor.setLocalTurnContext(
+                sessionId: latestSession.sessionId,
+                turnContext: updatedContext,
+                synchronizeThread: true
+            )
+
+            await MainActor.run {
+                dismissSlashPanel()
+                slashFeedbackMessage = nil
+            }
+        } catch {
+            await MainActor.run {
+                slashFeedbackMessage = error.localizedDescription
+            }
+        }
     }
 
     private func showSendFailure(_ message: String) {

@@ -275,6 +275,45 @@ class CodexSessionMonitor: ObservableObject {
         await prepareAppServerThread(session: session)
     }
 
+    func requireLocalAppServerThread(sessionId: String) async throws -> RemoteThreadState {
+        guard let session = await SessionStore.shared.session(for: sessionId),
+              session.provider == .codex else {
+            throw RemoteSessionError.missingThread
+        }
+
+        guard let thread = await ensureAppServerThread(for: session) else {
+            throw RemoteSessionError.missingThread
+        }
+
+        return thread
+    }
+
+    func listLocalModels(sessionId: String, includeHidden: Bool = false) async throws -> [RemoteAppServerModel] {
+        _ = try await requireLocalAppServerThread(sessionId: sessionId)
+        return try await localAppServerMonitor.listModels(
+            hostId: Self.localAppServerHost.id,
+            includeHidden: includeHidden
+        )
+    }
+
+    func listLocalCollaborationModes(sessionId: String) async throws -> [RemoteAppServerCollaborationModeMask] {
+        _ = try await requireLocalAppServerThread(sessionId: sessionId)
+        return try await localAppServerMonitor.listCollaborationModes(hostId: Self.localAppServerHost.id)
+    }
+
+    func setLocalTurnContext(
+        sessionId: String,
+        turnContext: RemoteThreadTurnContext,
+        synchronizeThread: Bool
+    ) async throws -> RemoteThreadState {
+        let thread = try await requireLocalAppServerThread(sessionId: sessionId)
+        return try await localAppServerMonitor.setTurnContext(
+            thread: thread,
+            turnContext: turnContext,
+            synchronizeThread: synchronizeThread
+        )
+    }
+
     func sendMessage(sessionId: String, text: String) async -> Bool {
         guard let session = await SessionStore.shared.session(for: sessionId) else {
             return false
