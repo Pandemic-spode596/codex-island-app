@@ -2,16 +2,60 @@
   <img src="CodexIsland/Assets.xcassets/AppIcon.appiconset/icon_128x128.png" alt="Codex Island logo" width="100" height="100">
   <h1 align="center">Codex Island</h1>
   <p align="center">
-    A macOS notch and menu bar companion for Codex CLI.
+    A Dynamic Island-style macOS companion for Codex CLI.
   </p>
   <p align="center">
     <a href="./README.zh-CN.md">简体中文</a>
     ·
     <a href="https://github.com/Jarcis-cy/codex-island-app/releases/latest">Latest Release</a>
   </p>
+  <p align="center">
+    <strong>Keep local and remote Codex sessions visible from the notch.</strong><br>
+    Handle approvals, switch threads, and recover context without living in terminal tabs.
+  </p>
+  <p align="center">
+    macOS 15.6+ · Local hooks · SSH remote hosts · Approval flows · Transcript-aware chat
+  </p>
+  <p align="center">
+    <img src="./docs/media/codex-island-hero.png" alt="Codex Island session overview" width="920">
+  </p>
 </div>
 
-Codex Island keeps an eye on your local Codex sessions, and it can also connect to Codex running on remote machines over SSH. It surfaces state changes in a Dynamic Island-style overlay on macOS for people who keep Codex in the terminal and want lightweight visibility, fast approval handling, and quick access to recent conversation context without living in every shell window.
+Codex Island is a macOS notch and menu bar companion for Codex CLI. It keeps local sessions visible, connects to remote hosts over SSH, and gives you a lightweight place to inspect chat state, approvals, and recent context without constant terminal context switches.
+
+## See It In Action
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./docs/media/remote-workflow.gif" alt="Remote Codex workflow in Codex Island" width="100%">
+    </td>
+    <td width="50%" align="center">
+      <img src="./docs/media/local-workflow.gif" alt="Local Codex workflow in Codex Island" width="100%">
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <strong>Remote workflow</strong><br>
+      Connect to a remote machine, resume threads, and work through SSH-backed Codex sessions from the same UI.
+    </td>
+    <td valign="top">
+      <strong>Local workflow</strong><br>
+      Track local sessions, surface plan-style interactions, and jump back into the right shell only when needed.
+    </td>
+  </tr>
+</table>
+
+## Highlights
+
+- Watches Codex sessions through `~/.codex/hooks.json` and a local Unix socket.
+- Connects to remote machines over SSH and talks to `codex app-server` over stdio.
+- Shows recent conversation history with markdown rendering and active model/context details in chat headers.
+- Supports approval flows directly from the app UI.
+- Tracks multiple local sessions and remote threads, and lets you switch between them quickly.
+- Lets you save SSH targets, optional default working directories, and auto-connect remote hosts from the app.
+- Includes launch-at-login, screen selection, sound settings, and in-app updates.
+- Falls back gracefully on Macs without a physical notch.
 
 ## What's New in 0.0.2
 
@@ -20,19 +64,6 @@ Codex Island keeps an eye on your local Codex sessions, and it can also connect 
 - Makes remote `/new` and `/resume` thread flows more reliable, especially when multiple threads share the same SSH target and working directory.
 - Keeps remote diagnostics off by default; you can enable `Remote Debug Logs` from the menu when you need `remote-app-server.jsonl`.
 - Fixes the initial local `Open Session` blank-chat problem and several remote session opening / rebinding issues.
-
-## What It Does
-
-- Watches Codex sessions through `~/.codex/hooks.json` and a local Unix socket.
-- Connects to remote machines over SSH and talks to `codex app-server` over stdio.
-- Expands from the notch area to show session activity, waiting states, and tool execution status.
-- Shows recent conversation history with markdown rendering.
-- Shows active model details and remaining context in chat headers.
-- Supports approval flows directly from the app UI.
-- Tracks multiple local sessions and remote threads, and lets you switch between them.
-- Lets you save SSH targets, optional default working directories, and auto-connect remote hosts from the app.
-- Includes launch-at-login, screen selection, sound settings, and in-app updates.
-- Falls back gracefully on Macs without a physical notch.
 
 ## Requirements
 
