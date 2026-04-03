@@ -10,7 +10,7 @@ RELEASE_DIR="$PROJECT_DIR/releases"
 KEYS_DIR="$PROJECT_DIR/.sparkle-keys"
 
 # GitHub repository (owner/repo format)
-GITHUB_REPO="Jarcis-cy/codex-island"
+GITHUB_REPO="Jarcis-cy/codex-island-app"
 
 # Website repo for auto-updating appcast
 WEBSITE_DIR="${CODEX_ISLAND_WEBSITE:-${CLAUDE_ISLAND_WEBSITE:-$PROJECT_DIR/../codex-island-website}}"

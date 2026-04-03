@@ -7,7 +7,7 @@
   <p align="center">
     <a href="./README.zh-CN.md">简体中文</a>
     ·
-    <a href="https://github.com/Jarcis-cy/codex-island/releases/latest">Latest Release</a>
+    <a href="https://github.com/Jarcis-cy/codex-island-app/releases/latest">Latest Release</a>
   </p>
 </div>
 
