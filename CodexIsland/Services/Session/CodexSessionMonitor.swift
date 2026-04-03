@@ -29,6 +29,7 @@ class CodexSessionMonitor: ObservableObject {
     private let localAppServerMonitor: RemoteSessionMonitor
     private var latestStoreSessions: [SessionState] = []
     private var pendingLocalThreadLoads: Set<String> = []
+    private var dismissedSyntheticSessionIds: Set<String> = []
 
     init(localAppServerMonitor: RemoteSessionMonitor? = nil) {
         self.localAppServerMonitor = localAppServerMonitor ?? Self.makeLocalAppServerMonitor()
@@ -163,7 +164,7 @@ class CodexSessionMonitor: ObservableObject {
 
     func respond(sessionId: String, action: PendingApprovalAction) {
         Task {
-            guard let session = await SessionStore.shared.session(for: sessionId),
+            guard let session = await sessionForInteraction(sessionId: sessionId),
                   let interaction = pendingInteraction(for: session) else {
                 return
             }
@@ -200,7 +201,7 @@ class CodexSessionMonitor: ObservableObject {
     }
 
     func respond(sessionId: String, answers: PendingInteractionAnswerPayload) async -> Bool {
-        guard let session = await SessionStore.shared.session(for: sessionId),
+        guard let session = await sessionForInteraction(sessionId: sessionId),
               case .userInput(let interaction)? = pendingInteraction(for: session) else {
             return false
         }
@@ -285,21 +286,106 @@ class CodexSessionMonitor: ObservableObject {
     }
 
     func prepareAppServerThread(sessionId: String) async {
-        guard let session = await SessionStore.shared.session(for: sessionId) else { return }
-        await prepareAppServerThread(session: session)
+        if let session = await SessionStore.shared.session(for: sessionId) {
+            await prepareAppServerThread(session: session)
+            return
+        }
+        guard localAppServerThreads[sessionId] != nil else { return }
+    }
+
+    private func sessionForInteraction(sessionId: String) async -> SessionState? {
+        if let session = await SessionStore.shared.session(for: sessionId) {
+            return session
+        }
+        return instances.first(where: { $0.sessionId == sessionId })
+    }
+
+    private func threadForSessionId(_ sessionId: String) -> RemoteThreadState? {
+        localAppServerThreads[sessionId]
+    }
+
+    private func runtimeInfo(from thread: RemoteThreadState) -> SessionRuntimeInfo {
+        SessionRuntimeInfo(
+            model: thread.currentModel,
+            reasoningEffort: thread.currentReasoningEffort?.rawValue,
+            modelProvider: nil,
+            tokenUsage: thread.tokenUsage
+        )
+    }
+
+    private func conversationInfo(from thread: RemoteThreadState) -> ConversationInfo {
+        overlayConversationInfo(
+            ConversationInfo(
+                summary: nil,
+                lastMessage: nil,
+                lastMessageRole: nil,
+                lastToolName: nil,
+                firstUserMessage: nil,
+                lastUserMessageDate: nil
+            ),
+            with: thread
+        )
+    }
+
+    private func syntheticSession(from thread: RemoteThreadState) -> SessionState {
+        SessionState(
+            sessionId: thread.threadId,
+            logicalSessionId: thread.logicalSessionId,
+            provider: .codex,
+            cwd: thread.cwd,
+            projectName: URL(fileURLWithPath: thread.cwd).lastPathComponent,
+            transcriptPath: nil,
+            pid: nil,
+            tty: nil,
+            terminalName: nil,
+            terminalWindowId: nil,
+            terminalTabId: nil,
+            terminalSurfaceId: nil,
+            isInTmux: false,
+            phase: thread.phase,
+            chatItems: thread.history,
+            pendingInteractions: thread.primaryPendingInteraction.map { [$0] } ?? [],
+            conversationInfo: conversationInfo(from: thread),
+            runtimeInfo: runtimeInfo(from: thread),
+            lastActivity: thread.lastActivity,
+            createdAt: thread.createdAt
+        )
+    }
+
+    private func syntheticLocalSessions(excluding sessions: [SessionState]) -> [SessionState] {
+        let existingSessionIds = Set(sessions.map(\.sessionId))
+        return localAppServerThreads.values
+            .filter { thread in
+                !existingSessionIds.contains(thread.threadId) &&
+                !dismissedSyntheticSessionIds.contains(thread.threadId)
+            }
+            .sorted { lhs, rhs in
+                if lhs.lastActivity != rhs.lastActivity {
+                    return lhs.lastActivity > rhs.lastActivity
+                }
+                return lhs.threadId < rhs.threadId
+            }
+            .map(syntheticSession(from:))
     }
 
     func requireLocalAppServerThread(sessionId: String) async throws -> RemoteThreadState {
-        guard let session = await SessionStore.shared.session(for: sessionId),
-              session.provider == .codex else {
-            throw RemoteSessionError.missingThread
+        if let session = await SessionStore.shared.session(for: sessionId) {
+            guard session.provider == .codex else {
+                throw RemoteSessionError.missingThread
+            }
+
+            guard let thread = await ensureAppServerThread(for: session) else {
+                throw RemoteSessionError.missingThread
+            }
+
+            return thread
         }
 
-        guard let thread = await ensureAppServerThread(for: session) else {
-            throw RemoteSessionError.missingThread
+        if let thread = threadForSessionId(sessionId) {
+            return thread
         }
 
-        return thread
+        throw RemoteSessionError.missingThread
     }
 
     func listLocalModels(sessionId: String, includeHidden: Bool = false) async throws -> [RemoteAppServerModel] {
@@ -329,26 +415,41 @@ class CodexSessionMonitor: ObservableObject {
     }
 
     func sendMessage(sessionId: String, text: String) async -> Bool {
-        guard let session = await SessionStore.shared.session(for: sessionId) else {
-            return false
+        if let session = await SessionStore.shared.session(for: sessionId) {
+            if session.provider == .codex,
+               let thread = await ensureAppServerThread(for: session) {
+                do {
+                    try await localAppServerMonitor.sendMessage(thread: thread, text: text)
+                    return true
+                } catch {
+                    // Fall through to terminal injection fallback.
+                }
+            }
+
+            return await sendToTerminalFallback(text: text, session: session)
         }
 
-        if session.provider == .codex,
-           let thread = await ensureAppServerThread(for: session) {
+        if let thread = threadForSessionId(sessionId) {
             do {
                 try await localAppServerMonitor.sendMessage(thread: thread, text: text)
                 return true
             } catch {
-                // Fall through to terminal injection fallback.
+                return false
             }
         }
 
-        return await sendToTerminalFallback(text: text, session: session)
+        return false
     }
 
     /// Archive (remove) a session from the instances list
     func archiveSession(sessionId: String) {
         Task {
+            if await SessionStore.shared.session(for: sessionId) == nil,
+               threadForSessionId(sessionId) != nil {
+                dismissedSyntheticSessionIds.insert(sessionId)
+                updateFromSessions(latestStoreSessions)
+                return
+            }
             await SessionStore.shared.process(.sessionEnded(sessionId: sessionId))
         }
     }
@@ -359,13 +460,14 @@ class CodexSessionMonitor: ObservableObject {
         latestStoreSessions = sessions
 
         let previousSessionIds = Set(instances.map(\.sessionId))
-        let mergedSessions = sessions.map(overlayLocalAppServerState)
+        let mergedSessions = sessions.map(overlayLocalAppServerState) + syntheticLocalSessions(excluding: sessions)
         let currentSessionIds = Set(mergedSessions.map(\.sessionId))
         let removedSessionIds = previousSessionIds.subtracting(currentSessionIds)
         for sessionId in removedSessionIds {
             InterruptWatcherManager.shared.stopWatching(sessionId: sessionId)
             CodexTranscriptWatcherManager.shared.stopWatching(sessionId: sessionId)
             pendingLocalThreadLoads.remove(sessionId)
+            dismissedSyntheticSessionIds.remove(sessionId)
         }
 
         instances = mergedSessions

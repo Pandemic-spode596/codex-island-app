@@ -7,6 +7,7 @@ final class PendingInteractionTests: XCTestCase {
         await resetSessionStore()
         await MainActor.run {
             ChatHistoryManager.shared.resetForTesting()
+            TestObjectRetainer.reset()
         }
     }
 
@@ -14,6 +15,7 @@ final class PendingInteractionTests: XCTestCase {
         await resetSessionStore()
         await MainActor.run {
             ChatHistoryManager.shared.resetForTesting()
+            TestObjectRetainer.reset()
         }
         try await super.tearDown()
     }
@@ -545,6 +547,119 @@ final class PendingInteractionTests: XCTestCase {
             return XCTFail("Expected assistant reply from app-server history")
         }
         XCTAssertEqual(reply, "history ready")
+    }
+
+    @MainActor
+    func testLocalAppServerOnlyThreadAppearsAsSyntheticSessionAndCanSendMessage() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let sentThreadId = LockedBox<String?>(nil)
+        let sentText = LockedBox<String?>(nil)
+        connection.sendMessageHandler = { threadId, text, _, _ in
+            await sentThreadId.set(threadId)
+            await sentText.set(text)
+        }
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+        localMonitor.apply(event: .threadUpsert(
+            hostId: host.id,
+            thread: makeThread(
+                id: "app-thread-1",
+                preview: "Synthetic Local Session",
+                status: .idle,
+                turns: [
+                    makeTurn(
+                        items: [.agentMessage(id: "assistant-1", text: "hello from synthetic thread")],
+                        status: .completed
+                    )
+                ],
+                cwd: "/tmp/synthetic-project"
+            )
+        ))
+        await Task.yield()
+
+        guard let syntheticSession = sessionMonitor.instances.first(where: { $0.sessionId == "app-thread-1" }) else {
+            return XCTFail("Expected synthetic local session")
+        }
+
+        XCTAssertEqual(syntheticSession.provider, .codex)
+        XCTAssertEqual(syntheticSession.displayTitle, "Synthetic Local Session")
+        XCTAssertEqual(syntheticSession.lastMessage, "hello from synthetic thread")
+        XCTAssertFalse(syntheticSession.canAttemptFocusTerminal)
+
+        let success = await sessionMonitor.sendMessage(sessionId: syntheticSession.sessionId, text: "send to synthetic")
+        let capturedThreadId = await sentThreadId.get()
+        let capturedText = await sentText.get()
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(capturedThreadId, "app-thread-1")
+        XCTAssertEqual(capturedText, "send to synthetic")
+    }
+
+    @MainActor
+    func testArchiveSyntheticLocalSessionHidesItFromInstances() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+        localMonitor.apply(event: .threadUpsert(
+            hostId: host.id,
+            thread: makeThread(
+                id: "app-thread-archive",
+                preview: "Archive Me",
+                status: .idle,
+                cwd: "/tmp/archive-project"
+            )
+        ))
+        await Task.yield()
+
+        XCTAssertNotNil(sessionMonitor.instances.first(where: { $0.sessionId == "app-thread-archive" }))
+
+        sessionMonitor.archiveSession(sessionId: "app-thread-archive")
+        await Task.yield()
+
+        XCTAssertNil(sessionMonitor.instances.first(where: { $0.sessionId == "app-thread-archive" }))
     }
 
     private func makeInteraction(questions: [PendingInteractionQuestion]) -> PendingUserInputInteraction {

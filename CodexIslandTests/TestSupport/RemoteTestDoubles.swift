@@ -95,6 +95,10 @@ enum TestObjectRetainer {
     static func retain(_ object: AnyObject) {
         retainedObjects.append(object)
     }
+
+    static func reset() {
+        retainedObjects.removeAll()
+    }
 }
 
 final class FakeRemoteConnection: RemoteAppServerConnectionProtocol, @unchecked Sendable {
