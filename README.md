@@ -15,6 +15,7 @@ Codex Island keeps an eye on your local Codex sessions, and it can also connect 
 
 ## What's New in 0.0.2
 
+- Builds on the remote-host support already introduced in `0.0.1`.
 - Shows model details and remaining context directly in local and remote chat headers.
 - Makes remote `/new` and `/resume` thread flows more reliable, especially when multiple threads share the same SSH target and working directory.
 - Keeps remote diagnostics off by default; you can enable `Remote Debug Logs` from the menu when you need `remote-app-server.jsonl`.
