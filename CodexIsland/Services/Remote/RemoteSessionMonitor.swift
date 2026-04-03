@@ -223,8 +223,16 @@ final class RemoteSessionMonitor: ObservableObject {
         Array(rawThreadsByHost[hostId, default: [:]].values)
     }
 
-    private func replaceRawThreads(hostId: String, with remoteThreads: [RemoteAppServerThread]) {
-        rawThreadsByHost[hostId] = Dictionary(uniqueKeysWithValues: remoteThreads.map { ($0.id, $0) })
+    private func replaceRawThreads(
+        hostId: String,
+        with remoteThreads: [RemoteAppServerThread],
+        retaining retainedThreads: [RemoteAppServerThread] = []
+    ) {
+        var mergedThreads = Dictionary(uniqueKeysWithValues: remoteThreads.map { ($0.id, $0) })
+        for thread in retainedThreads where mergedThreads[thread.id] == nil {
+            mergedThreads[thread.id] = thread
+        }
+        rawThreadsByHost[hostId] = mergedThreads
     }
 
     private func upsertRawThread(hostId: String, thread: RemoteAppServerThread) {
@@ -265,6 +273,23 @@ final class RemoteSessionMonitor: ObservableObject {
             }
             return lhs.createdAt < rhs.createdAt
         })
+    }
+
+    private func retainedPreferredThreads(
+        hostId: String,
+        host: RemoteHostConfig?,
+        remoteThreads: [RemoteAppServerThread]
+    ) -> [RemoteAppServerThread] {
+        let remoteThreadIds = Set(remoteThreads.map(\.id))
+        return rawThreads(hostId: hostId).filter { thread in
+            guard !remoteThreadIds.contains(thread.id) else { return false }
+            guard shouldDisplayThread(thread, for: host) else { return false }
+            let logicalSessionId = self.logicalSessionId(
+                sshTarget: host?.sshTarget ?? "",
+                cwd: thread.cwd
+            )
+            return preferredThreadBindings[logicalSessionId] == thread.id
+        }
     }
 
     private func provisionalThreadFilter(for host: RemoteHostConfig) -> String? {
@@ -960,8 +985,13 @@ final class RemoteSessionMonitor: ObservableObject {
 
     private func applyThreadList(hostId: String, remoteThreads: [RemoteAppServerThread]) {
         let host = hosts.first(where: { $0.id == hostId })
-        replaceRawThreads(hostId: hostId, with: remoteThreads)
-        let visibleThreads = remoteThreads.filter { shouldDisplayThread($0, for: host) }
+        let retainedThreads = retainedPreferredThreads(
+            hostId: hostId,
+            host: host,
+            remoteThreads: remoteThreads
+        )
+        replaceRawThreads(hostId: hostId, with: remoteThreads, retaining: retainedThreads)
+        let visibleThreads = rawThreads(hostId: hostId).filter { shouldDisplayThread($0, for: host) }
         let groupedThreads = Dictionary(grouping: visibleThreads) { thread in
             logicalSessionId(
                 sshTarget: host?.sshTarget ?? "",
