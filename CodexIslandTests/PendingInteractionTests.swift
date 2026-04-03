@@ -157,7 +157,7 @@ final class PendingInteractionTests: XCTestCase {
     }
 
     @MainActor
-    func testLocalTranscriptPendingInteractionIsIgnoredWithoutAppServerThread() async throws {
+    func testLocalTranscriptPendingInteractionIsShownWithoutAppServerThread() async throws {
         let connection = FakeRemoteConnection()
         let host = RemoteHostConfig(
             id: "local-app-server",
@@ -219,9 +219,91 @@ final class PendingInteractionTests: XCTestCase {
 
         let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
         XCTAssertEqual(session.phase, .idle)
-        XCTAssertTrue(session.pendingInteractions.isEmpty)
-        XCTAssertNil(sessionMonitor.pendingInteraction(for: session))
+        XCTAssertEqual(session.pendingInteractions.first?.id, "local-transcript-request")
+        XCTAssertEqual(sessionMonitor.pendingInteraction(for: session)?.id, "local-transcript-request")
         XCTAssertFalse(sessionMonitor.canSendMessage(to: session))
+        XCTAssertFalse(
+            sessionMonitor.canRespondInline(
+                to: session,
+                interaction: try XCTUnwrap(sessionMonitor.pendingInteraction(for: session))
+            )
+        )
+    }
+
+    @MainActor
+    func testLocalTranscriptPendingInteractionFallsBackWhenAppServerThreadHasNoInteraction() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+        await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
+        await Task.yield()
+
+        localMonitor.apply(event: .threadUpsert(
+            hostId: host.id,
+            thread: makeThread(id: "session-1", status: .idle)
+        ))
+        await SessionStore.shared.process(.fileUpdated(FileUpdatePayload(
+            sessionId: "session-1",
+            cwd: "/tmp/project",
+            messages: [],
+            isIncremental: true,
+            completedToolIds: [],
+            toolResults: [:],
+            structuredResults: [:],
+            pendingInteractions: [
+                .userInput(PendingUserInputInteraction(
+                    id: "local-transcript-request",
+                    title: "Codex needs your input",
+                    questions: [
+                        PendingInteractionQuestion(
+                            id: "next_step",
+                            header: "下一步",
+                            question: "继续还是执行？",
+                            options: [
+                                PendingInteractionOption(label: "执行", description: nil),
+                                PendingInteractionOption(label: "继续", description: nil)
+                            ],
+                            isOther: false,
+                            isSecret: false
+                        )
+                    ],
+                    transport: .codexLocal(callId: "local-transcript-request", turnId: "turn-1")
+                ))
+            ],
+            transcriptPhase: .waitingForInput
+        )))
+        await Task.yield()
+
+        let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
+        XCTAssertEqual(session.pendingInteractions.first?.id, "local-transcript-request")
+        XCTAssertEqual(sessionMonitor.pendingInteraction(for: session)?.id, "local-transcript-request")
+        XCTAssertFalse(
+            sessionMonitor.canRespondInline(
+                to: session,
+                interaction: try XCTUnwrap(sessionMonitor.pendingInteraction(for: session))
+            )
+        )
     }
 
     @MainActor

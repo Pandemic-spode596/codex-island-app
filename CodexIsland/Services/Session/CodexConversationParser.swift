@@ -515,6 +515,11 @@ actor CodexConversationParser {
         transcriptPhase: inout SessionPhase?
     ) {
         switch eventType {
+        case "task_started":
+            pendingInteractions.removeAll()
+            pendingInteractionOrder.removeAll()
+            transcriptPhase = .processing
+
         case "exec_command_end":
             guard let callId = payload["call_id"] as? String else { return }
             let stdout = payload["stdout"] as? String
@@ -566,7 +571,10 @@ actor CodexConversationParser {
             }
             transcriptPhase = .waitingForInput
 
-        case "turn_complete", "task_complete", "turn_aborted":
+        case "turn_complete", "task_complete":
+            transcriptPhase = .waitingForInput
+
+        case "turn_aborted":
             pendingInteractions.removeAll()
             pendingInteractionOrder.removeAll()
             transcriptPhase = .waitingForInput

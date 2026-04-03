@@ -711,10 +711,11 @@ actor SessionStore {
         let runtimeInfo = await SessionTranscriptParser.shared.runtimeInfo(session: session)
         session.conversationInfo = conversationInfo
         session.runtimeInfo = runtimeInfo
-        if session.provider == .codex {
-            session.pendingInteractions = []
-        } else {
-            session.pendingInteractions = payload.pendingInteractions
+        session.pendingInteractions = payload.pendingInteractions
+        if session.provider == .codex,
+           let transcriptPhase = payload.transcriptPhase,
+           session.phase.canTransition(to: transcriptPhase) {
+            session.phase = transcriptPhase
         }
 
         // Handle /clear reconciliation - remove items that no longer exist in parser state
@@ -1121,10 +1122,11 @@ actor SessionStore {
         // Update conversationInfo (summary, lastMessage, etc.)
         session.conversationInfo = conversationInfo
         session.runtimeInfo = runtimeInfo
-        if session.provider == .codex {
-            session.pendingInteractions = []
-        } else {
-            session.pendingInteractions = pendingInteractions
+        session.pendingInteractions = pendingInteractions
+        if session.provider == .codex,
+           let transcriptPhase,
+           session.phase.canTransition(to: transcriptPhase) {
+            session.phase = transcriptPhase
         }
 
         // Convert messages to chat items

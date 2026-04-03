@@ -205,7 +205,10 @@ class CodexSessionMonitor: ObservableObject {
         guard session.provider == .codex else {
             return session.primaryPendingInteraction
         }
-        return localThread(for: session)?.primaryPendingInteraction
+        if let thread = localThread(for: session) {
+            return thread.primaryPendingInteraction ?? session.primaryPendingInteraction
+        }
+        return session.primaryPendingInteraction
     }
 
     func canSendMessage(to session: SessionState) -> Bool {
@@ -558,7 +561,9 @@ class CodexSessionMonitor: ObservableObject {
         }
 
         var merged = session
-        merged.pendingInteractions = thread.primaryPendingInteraction.map { [$0] } ?? []
+        if let threadPendingInteraction = thread.primaryPendingInteraction {
+            merged.pendingInteractions = [threadPendingInteraction]
+        }
 
         if shouldPreferAppServerHistory(thread) {
             merged.chatItems = thread.history

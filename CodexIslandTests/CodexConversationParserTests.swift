@@ -79,6 +79,46 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(interaction.transport, .codexLocal(callId: "call_exit_plan_followup", turnId: "turn-1"))
     }
 
+    func testPendingUserInputSurvivesTurnCompleteUntilNextTaskStarts() async throws {
+        let transcript = #"""
+        {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}}
+        {"timestamp":"2026-04-03T08:44:11Z","type":"event_msg","payload":{"type":"request_user_input","payload":{"call_id":"call_exit_plan_followup","turn_id":"turn-1","questions":[{"header":"下一步","id":"next_step","question":"要执行这份报告，还是继续留在 Plan 模式里提问？","options":[{"label":"执行这份报告 (Recommended)","description":"退出 Plan 模式并按这份方案继续。"},{"label":"继续在 Plan 模式提问","description":"保留当前 Plan 模式，继续补充澄清问题。"}]}]}}}
+        {"timestamp":"2026-04-03T08:44:12Z","type":"event_msg","payload":{"type":"turn_complete","payload":{"turn_id":"turn-1"}}}
+        {"timestamp":"2026-04-03T08:44:13Z","type":"event_msg","payload":{"type":"task_complete","payload":{"turn_id":"turn-1"}}}
+        """#
+
+        let url = try makeTranscriptFile(contents: transcript)
+
+        let interactions = await CodexConversationParser.shared.pendingInteractions(
+            sessionId: UUID().uuidString,
+            transcriptPath: url.path
+        )
+
+        guard case .userInput(let interaction)? = interactions.first else {
+            return XCTFail("Expected user input interaction")
+        }
+
+        XCTAssertEqual(interaction.id, "call_exit_plan_followup")
+        XCTAssertEqual(interaction.questions.count, 1)
+    }
+
+    func testTaskStartedClearsPreviousPendingUserInput() async throws {
+        let transcript = #"""
+        {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}}
+        {"timestamp":"2026-04-03T08:44:11Z","type":"event_msg","payload":{"type":"request_user_input","payload":{"call_id":"call_exit_plan_followup","turn_id":"turn-1","questions":[{"header":"下一步","id":"next_step","question":"要执行这份报告，还是继续留在 Plan 模式里提问？","options":[{"label":"执行这份报告 (Recommended)","description":"退出 Plan 模式并按这份方案继续。"},{"label":"继续在 Plan 模式提问","description":"保留当前 Plan 模式，继续补充澄清问题。"}]}]}}}
+        {"timestamp":"2026-04-03T08:44:14Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-2","model_context_window":950000,"collaboration_mode_kind":"default"}}}
+        """#
+
+        let url = try makeTranscriptFile(contents: transcript)
+
+        let interactions = await CodexConversationParser.shared.pendingInteractions(
+            sessionId: UUID().uuidString,
+            transcriptPath: url.path
+        )
+
+        XCTAssertTrue(interactions.isEmpty)
+    }
+
     private func makeTranscriptFile(contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString,
