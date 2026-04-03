@@ -538,17 +538,37 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     func startThread(hostId: String) async throws -> RemoteThreadState {
-        try await startThread(hostId: hostId, reusingExistingLogicalSession: true, pinPreferredBinding: false)
+        try await startThread(
+            hostId: hostId,
+            reusingExistingLogicalSession: true,
+            pinPreferredBinding: false,
+            defaultCwdOverride: nil
+        )
     }
 
     func startFreshThread(hostId: String) async throws -> RemoteThreadState {
-        try await startThread(hostId: hostId, reusingExistingLogicalSession: false, pinPreferredBinding: true)
+        try await startThread(
+            hostId: hostId,
+            reusingExistingLogicalSession: false,
+            pinPreferredBinding: true,
+            defaultCwdOverride: nil
+        )
+    }
+
+    func startFreshThread(hostId: String, defaultCwd: String) async throws -> RemoteThreadState {
+        try await startThread(
+            hostId: hostId,
+            reusingExistingLogicalSession: false,
+            pinPreferredBinding: true,
+            defaultCwdOverride: defaultCwd
+        )
     }
 
     private func startThread(
         hostId: String,
         reusingExistingLogicalSession: Bool,
-        pinPreferredBinding: Bool
+        pinPreferredBinding: Bool,
+        defaultCwdOverride: String?
     ) async throws -> RemoteThreadState {
         guard let host = hosts.first(where: { $0.id == hostId }) else {
             throw RemoteSessionError.invalidConfiguration("Remote host no longer exists")
@@ -556,7 +576,8 @@ final class RemoteSessionMonitor: ObservableObject {
         guard let connection = connections[hostId] else {
             throw RemoteSessionError.notConnected
         }
-        let normalizedDefaultCwd = try await connection.normalizeCwd(host.defaultCwd)
+        let requestedDefaultCwd = defaultCwdOverride ?? host.defaultCwd
+        let normalizedDefaultCwd = try await connection.normalizeCwd(requestedDefaultCwd)
         if reusingExistingLogicalSession,
            let normalizedDefaultCwd,
            let existingThread = threads.first(where: {
@@ -568,7 +589,7 @@ final class RemoteSessionMonitor: ObservableObject {
         let existingThreadIds = Set(rawThreads(hostId: hostId).map(\.id))
 
         do {
-            let response = try await connection.startThread(defaultCwd: host.defaultCwd)
+            let response = try await connection.startThread(defaultCwd: requestedDefaultCwd)
             let thread = response.thread
             markStateChanged()
             hostActionErrors.removeValue(forKey: hostId)

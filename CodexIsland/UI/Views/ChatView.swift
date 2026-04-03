@@ -18,6 +18,8 @@ private enum LocalSlashCommand: String, CaseIterable, Identifiable {
     case plan = "/plan"
     case model = "/model"
     case permissions = "/permissions"
+    case new = "/new"
+    case resume = "/resume"
 
     var id: String { rawValue }
 
@@ -35,11 +37,24 @@ private enum LocalSlashCommand: String, CaseIterable, Identifiable {
             return "选择模型与 reasoning"
         case .permissions:
             return "选择权限 preset"
+        case .new:
+            return "新建空白本地会话"
+        case .resume:
+            return "恢复保存的本地线程"
         }
     }
 
     var supportsInlineArgs: Bool {
         self == .plan
+    }
+
+    var requiresStartableSession: Bool {
+        switch self {
+        case .plan, .model, .permissions:
+            return true
+        case .new, .resume:
+            return false
+        }
     }
 
     static func matches(for text: String) -> [LocalSlashCommand] {
@@ -73,6 +88,7 @@ private enum LocalSlashCommand: String, CaseIterable, Identifiable {
 private enum LocalSlashPanel: Equatable {
     case model
     case permissions
+    case resume
 }
 
 private struct LocalApprovalPreset: Identifiable, Equatable {
@@ -109,6 +125,7 @@ private struct LocalApprovalPreset: Identifiable, Equatable {
 
 struct ChatView: View {
     let logicalSessionId: String
+    let preferredSessionId: String
     let sessionMonitor: CodexSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
 
@@ -129,10 +146,18 @@ struct ChatView: View {
     @State private var isExecutingSlashAction = false
     @State private var availableModels: [RemoteAppServerModel] = []
     @State private var selectedModelForEffort: RemoteAppServerModel?
+    @State private var resumeCandidates: [SessionState] = []
     @FocusState private var isInputFocused: Bool
 
-    init(logicalSessionId: String, initialSession: SessionState, sessionMonitor: CodexSessionMonitor, viewModel: NotchViewModel) {
+    init(
+        logicalSessionId: String,
+        preferredSessionId: String,
+        initialSession: SessionState,
+        sessionMonitor: CodexSessionMonitor,
+        viewModel: NotchViewModel
+    ) {
         self.logicalSessionId = logicalSessionId
+        self.preferredSessionId = preferredSessionId
         self.sessionMonitor = sessionMonitor
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._session = State(initialValue: initialSession)
@@ -266,12 +291,12 @@ struct ChatView: View {
                         sessionId: session.sessionId
                     )
                 }
-            } else if !sessionMonitor.instances.contains(where: { $0.logicalSessionId == logicalSessionId }) {
+            } else if currentSession(in: sessionMonitor.instances) == nil {
                 viewModel.exitChat()
             }
         }
         .onReceive(sessionMonitor.$instances) { sessions in
-            if let updated = sessions.first(where: { $0.logicalSessionId == logicalSessionId }),
+            if let updated = currentSession(in: sessions),
                updated != session {
                 let previousSession = session
                 let hadPendingInteraction = hasPendingInteraction
@@ -301,7 +326,7 @@ struct ChatView: View {
                         await ensureHistoryLoaded(for: updated)
                     }
                 }
-            } else if !sessions.contains(where: { $0.logicalSessionId == logicalSessionId }) {
+            } else if currentSession(in: sessions) == nil {
                 viewModel.exitChat()
             }
         }
@@ -777,6 +802,8 @@ struct ChatView: View {
                     modelPanelContent
                 case .permissions:
                     permissionsPanelContent
+                case .resume:
+                    resumePanelContent
                 }
             }
         }
@@ -919,12 +946,57 @@ struct ChatView: View {
         }
     }
 
+    private var resumePanelContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if resumeCandidates.isEmpty {
+                Text("No other local threads available")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.45))
+            } else {
+                ForEach(resumeCandidates) { candidate in
+                    Button {
+                        Task {
+                            await resumeLocalThread(candidate)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(candidate.displayTitle)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.88))
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(candidate.lastActivity.formatted(date: .omitted, time: .shortened))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.35))
+                            }
+                            Text(candidate.cwd)
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.4))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color.white.opacity(0.05))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isExecutingSlashAction)
+                }
+            }
+        }
+    }
+
     private func title(for panel: LocalSlashPanel) -> String {
         switch panel {
         case .model:
             return "/model"
         case .permissions:
             return "/permissions"
+        case .resume:
+            return "/resume"
         }
     }
 
@@ -934,6 +1006,8 @@ struct ChatView: View {
             return "Choose what model and reasoning effort to use."
         case .permissions:
             return "Choose what Codex is allowed to do."
+        case .resume:
+            return "Resume a saved local chat."
         }
     }
 
@@ -1102,8 +1176,9 @@ struct ChatView: View {
     }
 
     private func handleSlashCommand(_ command: LocalSlashCommand, args: String?) {
-        guard canSendMessages else {
-            slashFeedbackMessage = "Waiting for Codex app-server"
+        let canConfigureSession = localAppServerThread?.canStartTurn ?? canSendMessages
+        if command.requiresStartableSession && !canConfigureSession {
+            slashFeedbackMessage = "'/\(command.bareName)' is disabled while a task is in progress."
             return
         }
 
@@ -1130,6 +1205,15 @@ struct ChatView: View {
             }
         case .permissions:
             activeSlashPanel = .permissions
+        case .new:
+            Task {
+                await startNewLocalThread()
+            }
+        case .resume:
+            activeSlashPanel = .resume
+            Task {
+                await loadResumeCandidates()
+            }
         }
     }
 
@@ -1142,7 +1226,12 @@ struct ChatView: View {
     }
 
     private func latestSession() -> SessionState? {
-        sessionMonitor.instances.first(where: { $0.logicalSessionId == logicalSessionId }) ?? session
+        currentSession(in: sessionMonitor.instances) ?? session
+    }
+
+    private func currentSession(in sessions: [SessionState]) -> SessionState? {
+        sessions.first(where: { $0.sessionId == preferredSessionId }) ??
+        sessions.first(where: { $0.logicalSessionId == logicalSessionId })
     }
 
     private func dismissSlashPanel() {
@@ -1175,6 +1264,23 @@ struct ChatView: View {
                 activeSlashPanel = nil
                 slashFeedbackMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func loadResumeCandidates() async {
+        guard let latestSession = latestSession() else { return }
+
+        await MainActor.run {
+            isSlashPanelLoading = true
+            resumeCandidates = []
+        }
+
+        let candidates = sessionMonitor.availableLocalThreads(excluding: latestSession.sessionId)
+            .filter { $0.sessionId != latestSession.sessionId }
+
+        await MainActor.run {
+            resumeCandidates = candidates
+            isSlashPanelLoading = false
         }
     }
 
@@ -1390,6 +1496,58 @@ struct ChatView: View {
             await MainActor.run {
                 dismissSlashPanel()
                 slashFeedbackMessage = nil
+            }
+        } catch {
+            await MainActor.run {
+                slashFeedbackMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func startNewLocalThread() async {
+        guard let latestSession = latestSession() else { return }
+
+        await MainActor.run {
+            isExecutingSlashAction = true
+        }
+        defer {
+            Task { @MainActor in
+                isExecutingSlashAction = false
+            }
+        }
+
+        do {
+            let opened = try await sessionMonitor.startFreshLocalThread(cwd: latestSession.cwd)
+            await MainActor.run {
+                dismissSlashPanel()
+                slashFeedbackMessage = nil
+                session = opened
+                viewModel.showChat(for: opened)
+            }
+        } catch {
+            await MainActor.run {
+                slashFeedbackMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func resumeLocalThread(_ candidate: SessionState) async {
+        await MainActor.run {
+            isExecutingSlashAction = true
+        }
+        defer {
+            Task { @MainActor in
+                isExecutingSlashAction = false
+            }
+        }
+
+        do {
+            let opened = try await sessionMonitor.openLocalThread(threadId: candidate.sessionId)
+            await MainActor.run {
+                dismissSlashPanel()
+                slashFeedbackMessage = nil
+                session = opened
+                viewModel.showChat(for: opened)
             }
         } catch {
             await MainActor.run {

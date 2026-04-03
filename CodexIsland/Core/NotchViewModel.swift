@@ -23,10 +23,15 @@ enum NotchOpenReason: Equatable {
     case unknown
 }
 
+struct LocalChatTarget: Equatable {
+    let logicalSessionId: String
+    let sessionId: String
+}
+
 enum NotchContentType: Equatable {
     case instances
     case menu
-    case chat(String)
+    case chat(LocalChatTarget)
     case remoteHosts
     case remoteChat(RemoteThreadState)
 
@@ -34,7 +39,7 @@ enum NotchContentType: Equatable {
         switch self {
         case .instances: return "instances"
         case .menu: return "menu"
-        case .chat(let logicalSessionId): return "chat-\(logicalSessionId)"
+        case .chat(let target): return "chat-\(target.logicalSessionId)-\(target.sessionId)"
         case .remoteHosts: return "remote-hosts"
         case .remoteChat(let thread): return "remote-chat-\(thread.stableId)-\(thread.threadId)"
         }
@@ -170,7 +175,7 @@ class NotchViewModel: ObservableObject {
     }
 
     /// The chat session we're viewing (persists across close/open)
-    private var currentChatLogicalSessionId: String?
+    private var currentChatTarget: LocalChatTarget?
     private var currentRemoteChatThread: RemoteThreadState?
 
     private func handleMouseMove(_ location: CGPoint) {
@@ -245,17 +250,17 @@ class NotchViewModel: ObservableObject {
 
         // Don't restore chat on notification - show instances list instead
         if reason == .notification {
-            currentChatLogicalSessionId = nil
+            currentChatTarget = nil
             return
         }
 
         // Restore chat session if we had one open before
-        if let logicalSessionId = currentChatLogicalSessionId {
+        if let target = currentChatTarget {
             // Avoid unnecessary updates if already showing this chat
-            if case .chat(let current) = contentType, current == logicalSessionId {
+            if case .chat(let current) = contentType, current == target {
                 return
             }
-            contentType = .chat(logicalSessionId)
+            contentType = .chat(target)
             return
         }
 
@@ -272,8 +277,8 @@ class NotchViewModel: ObservableObject {
     func notchClose() {
         cancelScheduledHoverClose()
         // Save chat session before closing if in chat mode
-        if case .chat(let logicalSessionId) = contentType {
-            currentChatLogicalSessionId = logicalSessionId
+        if case .chat(let target) = contentType {
+            currentChatTarget = target
         } else if case .remoteChat(let thread) = contentType {
             currentRemoteChatThread = thread
         }
@@ -297,15 +302,20 @@ class NotchViewModel: ObservableObject {
 
     func showChat(for session: SessionState) {
         // Avoid unnecessary updates if already showing this chat
-        if case .chat(let current) = contentType, current == session.logicalSessionId {
+        let target = LocalChatTarget(
+            logicalSessionId: session.logicalSessionId,
+            sessionId: session.sessionId
+        )
+        if case .chat(let current) = contentType, current == target {
             return
         }
         currentRemoteChatThread = nil
-        contentType = .chat(session.logicalSessionId)
+        currentChatTarget = target
+        contentType = .chat(target)
     }
 
     func showRemoteHosts() {
-        currentChatLogicalSessionId = nil
+        currentChatTarget = nil
         currentRemoteChatThread = nil
         contentType = .remoteHosts
     }
@@ -316,14 +326,14 @@ class NotchViewModel: ObservableObject {
            current.threadId == thread.threadId {
             return
         }
-        currentChatLogicalSessionId = nil
+        currentChatTarget = nil
         currentRemoteChatThread = thread
         contentType = .remoteChat(thread)
     }
 
     /// Go back to instances list and clear saved chat state
     func exitChat() {
-        currentChatLogicalSessionId = nil
+        currentChatTarget = nil
         currentRemoteChatThread = nil
         contentType = .instances
     }

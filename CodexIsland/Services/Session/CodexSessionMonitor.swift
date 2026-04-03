@@ -352,6 +352,13 @@ class CodexSessionMonitor: ObservableObject {
         )
     }
 
+    private func sessionState(for thread: RemoteThreadState) -> SessionState {
+        if let existingSession = latestStoreSessions.first(where: { $0.sessionId == thread.threadId }) {
+            return overlayLocalAppServerState(existingSession)
+        }
+        return syntheticSession(from: thread)
+    }
+
     private func syntheticLocalSessions(excluding sessions: [SessionState]) -> [SessionState] {
         let existingSessionIds = Set(sessions.map(\.sessionId))
         return localAppServerThreads.values
@@ -365,7 +372,7 @@ class CodexSessionMonitor: ObservableObject {
                 }
                 return lhs.threadId < rhs.threadId
             }
-            .map(syntheticSession(from:))
+            .map(sessionState(for:))
     }
 
     func requireLocalAppServerThread(sessionId: String) async throws -> RemoteThreadState {
@@ -399,6 +406,33 @@ class CodexSessionMonitor: ObservableObject {
     func listLocalCollaborationModes(sessionId: String) async throws -> [RemoteAppServerCollaborationModeMask] {
         _ = try await requireLocalAppServerThread(sessionId: sessionId)
         return try await localAppServerMonitor.listCollaborationModes(hostId: Self.localAppServerHost.id)
+    }
+
+    func availableLocalThreads(excluding sessionId: String? = nil) -> [SessionState] {
+        localAppServerMonitor.availableThreads(
+            hostId: Self.localAppServerHost.id,
+            excluding: sessionId
+        ).map(sessionState(for:))
+    }
+
+    func startFreshLocalThread(cwd: String) async throws -> SessionState {
+        let thread = try await localAppServerMonitor.startFreshThread(
+            hostId: Self.localAppServerHost.id,
+            defaultCwd: cwd
+        )
+        dismissedSyntheticSessionIds.remove(thread.threadId)
+        updateFromSessions(latestStoreSessions)
+        return sessionState(for: thread)
+    }
+
+    func openLocalThread(threadId: String) async throws -> SessionState {
+        let thread = try await localAppServerMonitor.openThread(
+            hostId: Self.localAppServerHost.id,
+            threadId: threadId
+        )
+        dismissedSyntheticSessionIds.remove(thread.threadId)
+        updateFromSessions(latestStoreSessions)
+        return sessionState(for: thread)
     }
 
     func setLocalTurnContext(

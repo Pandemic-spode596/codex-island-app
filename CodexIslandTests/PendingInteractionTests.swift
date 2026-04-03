@@ -662,6 +662,110 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertNil(sessionMonitor.instances.first(where: { $0.sessionId == "app-thread-archive" }))
     }
 
+    @MainActor
+    func testStartFreshLocalThreadUsesRequestedCwdAndReturnsSession() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let capturedCwd = LockedBox<String?>(nil)
+        connection.startThreadHandler = { defaultCwd in
+            await capturedCwd.set(defaultCwd)
+            return await makeThreadStartResponse(
+                thread: makeThread(
+                    id: "fresh-local-thread",
+                    preview: "Fresh Local",
+                    status: .idle,
+                    cwd: defaultCwd
+                ),
+                cwd: defaultCwd
+            )
+        }
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+
+        let opened = try await sessionMonitor.startFreshLocalThread(cwd: "/tmp/fresh-project")
+        let observedCwd = await capturedCwd.get()
+
+        XCTAssertEqual(observedCwd, "/tmp/fresh-project")
+        XCTAssertEqual(opened.sessionId, "fresh-local-thread")
+        XCTAssertEqual(opened.cwd, "/tmp/fresh-project")
+        XCTAssertTrue(sessionMonitor.instances.contains(where: { $0.sessionId == "fresh-local-thread" }))
+    }
+
+    @MainActor
+    func testOpenLocalThreadReturnsSyntheticSession() async throws {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        connection.resumeThreadHandler = { threadId, _ in
+            XCTAssertEqual(threadId, "resume-local-thread")
+            return await makeThreadResumeResponse(
+                thread: makeThread(
+                    id: threadId,
+                    preview: "Resumed Local",
+                    status: .idle,
+                    turns: [
+                        makeTurn(
+                            items: [.agentMessage(id: "assistant-1", text: "restored")],
+                            status: .completed
+                        )
+                    ],
+                    cwd: "/tmp/resume-project"
+                ),
+                cwd: "/tmp/resume-project"
+            )
+        }
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        localMonitor.startMonitoring()
+
+        let opened = try await sessionMonitor.openLocalThread(threadId: "resume-local-thread")
+
+        XCTAssertEqual(opened.sessionId, "resume-local-thread")
+        XCTAssertEqual(opened.displayTitle, "Resumed Local")
+        XCTAssertEqual(opened.lastMessage, "restored")
+        XCTAssertTrue(sessionMonitor.instances.contains(where: { $0.sessionId == "resume-local-thread" }))
+    }
+
     private func makeInteraction(questions: [PendingInteractionQuestion]) -> PendingUserInputInteraction {
         PendingUserInputInteraction(
             id: "call-1",

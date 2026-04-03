@@ -51,6 +51,17 @@ final class NotchViewModelTests: XCTestCase {
         )
     }
 
+    func testLocalChatContentIdIncludesSessionId() {
+        let first = LocalChatTarget(logicalSessionId: "local|term|/repo", sessionId: "session-1")
+        let second = LocalChatTarget(logicalSessionId: "local|term|/repo", sessionId: "session-2")
+
+        XCTAssertNotEqual(NotchContentType.chat(first), NotchContentType.chat(second))
+        XCTAssertEqual(
+            NotchContentType.chat(second).id,
+            "chat-\(second.logicalSessionId)-\(second.sessionId)"
+        )
+    }
+
     func testSessionPhaseSummaryCountsRunningWaitingAndIdleBuckets() {
         let summary = SessionPhaseSummary(phases: [
             .processing,
