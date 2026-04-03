@@ -119,6 +119,24 @@ final class NotchViewModelTests: XCTestCase {
         )
     }
 
+    func testClosedHitAreaCanExtendBeyondPhysicalNotch() {
+        let geometry = NotchGeometry(
+            deviceNotchRect: CGRect(x: 0, y: 0, width: 200, height: 32),
+            screenRect: CGRect(x: 0, y: 0, width: 1512, height: 982),
+            windowHeight: 750
+        )
+        let pointInExtendedArea = CGPoint(x: 920, y: 960)
+
+        XCTAssertFalse(geometry.isPointInClosedPanel(pointInExtendedArea))
+        XCTAssertTrue(
+            geometry.isPointInClosedPanel(
+                pointInExtendedArea,
+                visibleWidth: 332,
+                horizontalOffset: 49
+            )
+        )
+    }
+
     private func makeViewModel(hoverCloseDelay: TimeInterval = 2.0) -> NotchViewModel {
         NotchViewModel(
             deviceNotchRect: CGRect(x: 0, y: 0, width: 200, height: 32),

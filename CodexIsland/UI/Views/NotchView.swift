@@ -92,6 +92,17 @@ struct NotchView: View {
         return (collapsedSummaryExtensionWidth - collapsedLeadingVisibleWidth) / 2
     }
 
+    private var closedHitAreaWidth: CGFloat {
+        if showsCollapsedSummary {
+            return collapsedHeaderWidth + cornerRadiusInsets.closed.bottom * 2
+        }
+        return closedNotchSize.width
+    }
+
+    private var closedHitAreaOffset: CGFloat {
+        showsCollapsedSummary ? collapsedHeaderOffset : 0
+    }
+
     // MARK: - Corner Radii
 
     private var topCornerRadius: CGFloat {
@@ -131,22 +142,26 @@ struct NotchView: View {
         .onAppear {
             sessionMonitor.startMonitoring()
             remoteSessionMonitor.startMonitoring()
+            syncClosedHitArea()
             // On non-notched devices, keep visible so users have a target to interact with
             if !viewModel.hasPhysicalNotch {
                 isVisible = true
             }
         }
         .onChange(of: viewModel.status) { oldStatus, newStatus in
+            syncClosedHitArea()
             handleStatusChange(from: oldStatus, to: newStatus)
         }
         .onChange(of: sessionMonitor.pendingInstances) { _, sessions in
             handlePendingSessionsChange(sessions)
         }
         .onChange(of: sessionMonitor.instances) { _, instances in
+            syncClosedHitArea()
             handleProcessingChange()
             handleWaitingForInputChange(instances)
         }
         .onChange(of: remoteSessionMonitor.threads) { _, threads in
+            syncClosedHitArea()
             handleProcessingChange()
             handleRemotePendingChange(threads)
             handleRemoteWaitingForInputChange(threads)
@@ -393,6 +408,13 @@ struct NotchView: View {
                 }
             }
         }
+    }
+
+    private func syncClosedHitArea() {
+        viewModel.updateClosedHitArea(
+            width: closedHitAreaWidth,
+            horizontalOffset: closedHitAreaOffset
+        )
     }
 
     private func handlePendingSessionsChange(_ sessions: [SessionState]) {

@@ -69,6 +69,8 @@ class NotchViewModel: ObservableObject {
     var deviceNotchRect: CGRect { geometry.deviceNotchRect }
     var screenRect: CGRect { geometry.screenRect }
     var windowHeight: CGFloat { geometry.windowHeight }
+    private(set) var closedHitAreaWidth: CGFloat
+    private(set) var closedHitAreaOffsetX: CGFloat = 0
 
     /// Dynamic opened size based on content type
     var openedSize: CGSize {
@@ -133,6 +135,7 @@ class NotchViewModel: ObservableObject {
         )
         self.hasPhysicalNotch = hasPhysicalNotch
         self.hoverCloseDelay = hoverCloseDelay
+        self.closedHitAreaWidth = deviceNotchRect.width
         if monitorEvents {
             setupEventHandlers()
         }
@@ -178,8 +181,21 @@ class NotchViewModel: ObservableObject {
     private var currentChatTarget: LocalChatTarget?
     private var currentRemoteChatThread: RemoteThreadState?
 
+    func updateClosedHitArea(width: CGFloat, horizontalOffset: CGFloat) {
+        let normalizedWidth = max(deviceNotchRect.width, width)
+        guard closedHitAreaWidth != normalizedWidth || closedHitAreaOffsetX != horizontalOffset else {
+            return
+        }
+        closedHitAreaWidth = normalizedWidth
+        closedHitAreaOffsetX = horizontalOffset
+    }
+
     private func handleMouseMove(_ location: CGPoint) {
-        let inNotch = geometry.isPointInNotch(location)
+        let inNotch = geometry.isPointInClosedPanel(
+            location,
+            visibleWidth: closedHitAreaWidth,
+            horizontalOffset: closedHitAreaOffsetX
+        )
         let inOpened = status == .opened && geometry.isPointInOpenedPanel(location, size: openedSize)
         setHovering(inNotch || inOpened)
     }
@@ -216,7 +232,11 @@ class NotchViewModel: ObservableObject {
                 }
             }
         case .closed, .popping:
-            if geometry.isPointInNotch(location) {
+            if geometry.isPointInClosedPanel(
+                location,
+                visibleWidth: closedHitAreaWidth,
+                horizontalOffset: closedHitAreaOffsetX
+            ) {
                 notchOpen(reason: .click)
             }
         }
