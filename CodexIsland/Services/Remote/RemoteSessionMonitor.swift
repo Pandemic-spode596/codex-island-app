@@ -103,6 +103,18 @@ nonisolated struct RemoteAppServerConnectionDependencies: Sendable {
             try await Task.sleep(for: duration)
         }
     )
+
+    static let local = RemoteAppServerConnectionDependencies(
+        transportFactory: { _ in LocalCodexAppServerTransport() },
+        processExecutor: ProcessExecutor.shared,
+        diagnosticsLogger: RemoteDiagnosticsLogger.shared,
+        requestTimeout: .seconds(10),
+        initialRefreshDelay: .seconds(5),
+        refreshInterval: .seconds(15),
+        sleep: { duration in
+            try await Task.sleep(for: duration)
+        }
+    )
 }
 
 actor RemoteRequestSerialGate {

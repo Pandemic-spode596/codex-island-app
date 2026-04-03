@@ -43,7 +43,7 @@ struct ChatView: View {
     }
 
     private var pendingInteraction: PendingInteraction? {
-        session.primaryPendingInteraction
+        sessionMonitor.pendingInteraction(for: session)
     }
 
     private var hasPendingInteraction: Bool {
@@ -77,7 +77,7 @@ struct ChatView: View {
                 if let pendingInteraction {
                     PendingInteractionBar(
                         interaction: pendingInteraction,
-                        canRespondInline: NativeTerminalInputSender.shared.canSend(to: session),
+                        canRespondInline: sessionMonitor.canRespondInline(to: session, interaction: pendingInteraction),
                         canOpenTerminal: session.canAttemptFocusTerminal,
                         onApprovalAction: { action in
                             respondToApproval(action)
@@ -103,6 +103,7 @@ struct ChatView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: hasPendingInteraction)
         .animation(nil, value: viewModel.status)
         .task(id: session.sessionId) {
+            await sessionMonitor.prepareAppServerThread(session: session)
             await ensureHistoryLoaded(for: session)
         }
         .onReceive(ChatHistoryManager.shared.$histories) { histories in
@@ -387,9 +388,9 @@ struct ChatView: View {
 
     // MARK: - Input Bar
 
-    /// Can send messages only if session is in tmux
+    /// Prefer app-server messaging for local Codex sessions and fall back to terminal when needed.
     private var canSendMessages: Bool {
-        session.isInTmux && session.tty != nil
+        sessionMonitor.canSendMessage(to: session)
     }
 
     private var messagingPromptText: String {
@@ -398,10 +399,10 @@ struct ChatView: View {
         }
 
         if session.canAttemptFocusTerminal {
-            return "Messaging requires tmux. Open Terminal"
+            return "Messaging unavailable. Open Terminal"
         }
 
-        return "Open Codex in tmux to enable messaging"
+        return "Waiting for Codex app-server"
     }
 
     private var inputBar: some View {
@@ -583,14 +584,11 @@ struct ChatView: View {
     }
 
     private func sendToSession(_ text: String) async -> Bool {
-        guard let latestSession = latestSession(),
-              latestSession.isInTmux,
-              let tty = latestSession.tty,
-              let target = await TmuxController.shared.findTmuxTarget(forTTY: tty) else {
+        guard let latestSession = latestSession() else {
             return false
         }
 
-        return await ToolApprovalHandler.shared.sendMessage(text, to: target)
+        return await sessionMonitor.sendMessage(sessionId: latestSession.sessionId, text: text)
     }
 
     private func latestSession() -> SessionState? {
@@ -1308,7 +1306,7 @@ struct PendingInteractionBar: View {
                 }
 
                 if isSubmitting {
-                    Text("Sending answer to terminal...")
+                    Text("Sending answer...")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.white.opacity(0.4))
                 }

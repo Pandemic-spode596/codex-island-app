@@ -12,17 +12,42 @@ import Foundation
 
 @MainActor
 class CodexSessionMonitor: ObservableObject {
+    private static let localAppServerHost = RemoteHostConfig(
+        id: "local-app-server",
+        name: "Local App Server",
+        sshTarget: "local-app-server",
+        defaultCwd: "",
+        isEnabled: true
+    )
+
     @Published var instances: [SessionState] = []
     @Published var pendingInstances: [SessionState] = []
+    @Published private(set) var localAppServerThreads: [String: RemoteThreadState] = [:]
 
     private var cancellables = Set<AnyCancellable>()
     private var codexLivenessTask: Task<Void, Never>?
+    private let localAppServerMonitor: RemoteSessionMonitor
+    private var latestStoreSessions: [SessionState] = []
+    private var pendingLocalThreadLoads: Set<String> = []
 
-    init() {
+    init(localAppServerMonitor: RemoteSessionMonitor? = nil) {
+        self.localAppServerMonitor = localAppServerMonitor ?? Self.makeLocalAppServerMonitor()
+
         SessionStore.shared.sessionsPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] sessions in
                 self?.updateFromSessions(sessions)
+            }
+            .store(in: &cancellables)
+
+        self.localAppServerMonitor.$threads
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] threads in
+                guard let self else { return }
+                self.localAppServerThreads = Dictionary(
+                    uniqueKeysWithValues: threads.map { ($0.threadId, $0) }
+                )
+                self.updateFromSessions(self.latestStoreSessions)
             }
             .store(in: &cancellables)
 
@@ -33,10 +58,15 @@ class CodexSessionMonitor: ObservableObject {
     // MARK: - Monitoring Lifecycle
 
     func startMonitoring() {
+        localAppServerMonitor.startMonitoring()
         HookSocketServer.shared.start(
-            onEvent: { event in
-                Task {
+            onEvent: { [weak self] event in
+                Task { @MainActor in
                     await SessionStore.shared.process(.hookReceived(event))
+
+                    if event.provider == .codex {
+                        await self?.prepareAppServerThread(sessionId: event.sessionId)
+                    }
                 }
 
                 if event.provider == .claude && event.sessionPhase == .processing {
@@ -104,52 +134,46 @@ class CodexSessionMonitor: ObservableObject {
     // MARK: - Permission Handling
 
     func approvePermission(sessionId: String) {
-        Task {
-            guard let session = await SessionStore.shared.session(for: sessionId),
-                  let permission = session.activePermission else {
-                return
-            }
-
-            HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
-                decision: "allow"
-            )
-
-            await SessionStore.shared.process(
-                .permissionApproved(sessionId: sessionId, toolUseId: permission.toolUseId)
-            )
-        }
+        respond(sessionId: sessionId, action: .allow)
     }
 
     func denyPermission(sessionId: String, reason: String?) {
-        Task {
-            guard let session = await SessionStore.shared.session(for: sessionId),
-                  let permission = session.activePermission else {
-                return
+        if let reason, !reason.isEmpty {
+            Task {
+                guard let session = await SessionStore.shared.session(for: sessionId),
+                      let permission = session.activePermission else {
+                    return
+                }
+
+                HookSocketServer.shared.respondToPermission(
+                    toolUseId: permission.toolUseId,
+                    decision: "deny",
+                    reason: reason
+                )
+
+                await SessionStore.shared.process(
+                    .permissionDenied(sessionId: sessionId, toolUseId: permission.toolUseId, reason: reason)
+                )
             }
-
-            HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
-                decision: "deny",
-                reason: reason
-            )
-
-            await SessionStore.shared.process(
-                .permissionDenied(sessionId: sessionId, toolUseId: permission.toolUseId, reason: reason)
-            )
+            return
         }
+
+        respond(sessionId: sessionId, action: .deny)
     }
 
     func respond(sessionId: String, action: PendingApprovalAction) {
         Task {
             guard let session = await SessionStore.shared.session(for: sessionId),
-                  let interaction = session.primaryPendingInteraction else {
+                  let interaction = pendingInteraction(for: session) else {
                 return
             }
 
             switch interaction {
             case .approval(let approval):
                 switch approval.transport {
+                case .remoteAppServer:
+                    guard let thread = await ensureAppServerThread(for: session) else { return }
+                    try? await localAppServerMonitor.respond(thread: thread, action: action)
                 case .hookPermission(let toolUseId):
                     let decision = action == .allow ? "allow" : "deny"
                     HookSocketServer.shared.respondToPermission(toolUseId: toolUseId, decision: decision)
@@ -168,8 +192,6 @@ class CodexSessionMonitor: ObservableObject {
                         return
                     }
                     await refreshSessionAfterInteraction(session)
-                case .remoteAppServer:
-                    break
                 }
             case .userInput:
                 break
@@ -179,19 +201,96 @@ class CodexSessionMonitor: ObservableObject {
 
     func respond(sessionId: String, answers: PendingInteractionAnswerPayload) async -> Bool {
         guard let session = await SessionStore.shared.session(for: sessionId),
-              case .userInput(let interaction)? = session.primaryPendingInteraction,
-              interaction.transport.isLocalCodex,
-              interaction.supportsInlineResponse,
-              let steps = localUserInputSteps(for: interaction, answers: answers),
-              await NativeTerminalInputSender.shared.send(steps: steps, to: session) else {
+              case .userInput(let interaction)? = pendingInteraction(for: session) else {
             return false
         }
 
-        let isTerminalAnswer = answers.answers.keys.count == interaction.questions.count
-        if isTerminalAnswer {
-            await refreshSessionAfterInteraction(session)
+        switch interaction.transport {
+        case .remoteAppServer:
+            guard let thread = await ensureAppServerThread(for: session) else { return false }
+            do {
+                try await localAppServerMonitor.respond(thread: thread, interaction: interaction, answers: answers)
+                return true
+            } catch {
+                return false
+            }
+        case .codexLocal:
+            guard interaction.supportsInlineResponse,
+                  let steps = localUserInputSteps(for: interaction, answers: answers),
+                  await NativeTerminalInputSender.shared.send(steps: steps, to: session) else {
+                return false
+            }
+
+            let isTerminalAnswer = answers.answers.keys.count == interaction.questions.count
+            if isTerminalAnswer {
+                await refreshSessionAfterInteraction(session)
+            }
+            return true
+        case .hookPermission:
+            return false
         }
-        return true
+    }
+
+    func pendingInteraction(for session: SessionState) -> PendingInteraction? {
+        guard session.provider == .codex else {
+            return session.primaryPendingInteraction
+        }
+        return localAppServerThreads[session.sessionId]?.primaryPendingInteraction ?? session.primaryPendingInteraction
+    }
+
+    func canSendMessage(to session: SessionState) -> Bool {
+        guard session.provider == .codex else {
+            return session.isInTmux && session.tty != nil
+        }
+
+        if let thread = localAppServerThreads[session.sessionId] {
+            return thread.canSendMessage
+        }
+
+        return session.primaryPendingInteraction == nil
+    }
+
+    func canRespondInline(to session: SessionState, interaction: PendingInteraction) -> Bool {
+        guard session.provider == .codex else {
+            return NativeTerminalInputSender.shared.canSend(to: session)
+        }
+
+        switch interaction.transport {
+        case .remoteAppServer:
+            return true
+        case .codexLocal:
+            return NativeTerminalInputSender.shared.canSend(to: session)
+        case .hookPermission:
+            return false
+        }
+    }
+
+    func prepareAppServerThread(session: SessionState) async {
+        guard session.provider == .codex else { return }
+        _ = await ensureAppServerThread(for: session)
+    }
+
+    func prepareAppServerThread(sessionId: String) async {
+        guard let session = await SessionStore.shared.session(for: sessionId) else { return }
+        await prepareAppServerThread(session: session)
+    }
+
+    func sendMessage(sessionId: String, text: String) async -> Bool {
+        guard let session = await SessionStore.shared.session(for: sessionId) else {
+            return false
+        }
+
+        if session.provider == .codex,
+           let thread = await ensureAppServerThread(for: session) {
+            do {
+                try await localAppServerMonitor.sendMessage(thread: thread, text: text)
+                return true
+            } catch {
+                // Fall through to terminal injection fallback.
+            }
+        }
+
+        return await sendToTerminalFallback(text: text, session: session)
     }
 
     /// Archive (remove) a session from the instances list
@@ -204,16 +303,20 @@ class CodexSessionMonitor: ObservableObject {
     // MARK: - State Update
 
     private func updateFromSessions(_ sessions: [SessionState]) {
+        latestStoreSessions = sessions
+
         let previousSessionIds = Set(instances.map(\.sessionId))
-        let currentSessionIds = Set(sessions.map(\.sessionId))
+        let mergedSessions = sessions.map(overlayLocalAppServerState)
+        let currentSessionIds = Set(mergedSessions.map(\.sessionId))
         let removedSessionIds = previousSessionIds.subtracting(currentSessionIds)
         for sessionId in removedSessionIds {
             InterruptWatcherManager.shared.stopWatching(sessionId: sessionId)
             CodexTranscriptWatcherManager.shared.stopWatching(sessionId: sessionId)
+            pendingLocalThreadLoads.remove(sessionId)
         }
 
-        instances = sessions
-        pendingInstances = sessions.filter { $0.needsAttention }
+        instances = mergedSessions
+        pendingInstances = mergedSessions.filter { $0.needsAttention }
     }
 
     // MARK: - History Loading (for UI)
@@ -228,6 +331,79 @@ class CodexSessionMonitor: ObservableObject {
     private func refreshSessionAfterInteraction(_ session: SessionState) async {
         try? await Task.sleep(for: .milliseconds(250))
         await SessionStore.shared.process(.loadHistory(sessionId: session.sessionId, cwd: session.cwd))
+    }
+
+    private func overlayLocalAppServerState(_ session: SessionState) -> SessionState {
+        guard session.provider == .codex,
+              let thread = localAppServerThreads[session.sessionId] else {
+            return session
+        }
+
+        var merged = session
+        merged.pendingInteractions = thread.primaryPendingInteraction.map { [$0] } ?? []
+
+        if thread.isLoaded || thread.phase.isActive || thread.needsAttention {
+            merged.phase = thread.phase
+        }
+        if let model = thread.currentModel, !model.isEmpty {
+            merged.runtimeInfo.model = model
+        }
+        if let reasoningEffort = thread.currentReasoningEffort?.rawValue, !reasoningEffort.isEmpty {
+            merged.runtimeInfo.reasoningEffort = reasoningEffort
+        }
+        if let tokenUsage = thread.tokenUsage {
+            merged.runtimeInfo.tokenUsage = tokenUsage
+        }
+        return merged
+    }
+
+    private func ensureAppServerThread(for session: SessionState) async -> RemoteThreadState? {
+        guard session.provider == .codex else { return nil }
+        if let thread = localAppServerThreads[session.sessionId] {
+            return thread
+        }
+        if pendingLocalThreadLoads.contains(session.sessionId) {
+            return nil
+        }
+
+        pendingLocalThreadLoads.insert(session.sessionId)
+        defer { pendingLocalThreadLoads.remove(session.sessionId) }
+
+        do {
+            try? await localAppServerMonitor.refreshHostNow(id: Self.localAppServerHost.id)
+            return try await localAppServerMonitor.openThread(
+                hostId: Self.localAppServerHost.id,
+                threadId: session.sessionId
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private func sendToTerminalFallback(text: String, session: SessionState) async -> Bool {
+        guard session.isInTmux,
+              let tty = session.tty,
+              let target = await TmuxController.shared.findTmuxTarget(forTTY: tty) else {
+            return false
+        }
+
+        return await ToolApprovalHandler.shared.sendMessage(text, to: target)
+    }
+
+    private static func makeLocalAppServerMonitor() -> RemoteSessionMonitor {
+        let host = localAppServerHost
+        return RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            connectionFactory: { host, emit in
+                RemoteAppServerConnection(
+                    host: host,
+                    emit: emit,
+                    dependencies: .local
+                )
+            }
+        )
     }
 
     private func monitorCodexProcessLiveness() async {

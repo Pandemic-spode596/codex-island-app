@@ -2,7 +2,7 @@
 //  RemoteAppServerTransport.swift
 //  CodexIsland
 //
-//  SSH stdio transport abstraction for remote app-server connections.
+//  Process stdio transport abstraction for local and remote app-server connections.
 //
 
 import Foundation
@@ -17,9 +17,11 @@ nonisolated protocol RemoteAppServerTransport: Sendable {
     func stop() async
 }
 
-final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
-    private let host: RemoteHostConfig
-    private let ioQueue = DispatchQueue(label: "com.codexisland.remote-transport", qos: .userInitiated)
+final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
+    private let executableURL: URL
+    private let arguments: [String]
+    private let ioQueue: DispatchQueue
+
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutSource: DispatchSourceRead?
@@ -27,8 +29,14 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
     private var stdoutBuffer = Data()
     private var stderrBuffer = Data()
 
-    init(host: RemoteHostConfig) {
-        self.host = host
+    nonisolated init(
+        executableURL: URL,
+        arguments: [String],
+        queueLabel: String = "com.codexisland.remote-transport"
+    ) {
+        self.executableURL = executableURL
+        self.arguments = arguments
+        self.ioQueue = DispatchQueue(label: queueLabel, qos: .userInitiated)
     }
 
     func start(
@@ -43,14 +51,8 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = [
-            "-T",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=5",
-            host.sshTarget,
-            "codex", "app-server", "--listen", "stdio://"
-        ]
+        process.executableURL = executableURL
+        process.arguments = arguments
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -161,5 +163,80 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
                 await forward(line)
             }
         }
+    }
+}
+
+final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
+    private let transport: ProcessStdioTransport
+
+    nonisolated init(host: RemoteHostConfig) {
+        self.transport = ProcessStdioTransport(
+            executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
+            arguments: [
+                "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                host.sshTarget,
+                "codex", "app-server", "--listen", "stdio://"
+            ],
+            queueLabel: "com.codexisland.remote-ssh-transport"
+        )
+    }
+
+    func start(
+        onStdoutLine: @escaping @Sendable (String) async -> Void,
+        onStderrLine: @escaping @Sendable (String) async -> Void,
+        onTermination: @escaping @Sendable (Int32) async -> Void
+    ) async throws {
+        try await transport.start(
+            onStdoutLine: onStdoutLine,
+            onStderrLine: onStderrLine,
+            onTermination: onTermination
+        )
+    }
+
+    func send(line: String) async throws {
+        try await transport.send(line: line)
+    }
+
+    func stop() async {
+        await transport.stop()
+    }
+}
+
+final class LocalCodexAppServerTransport: RemoteAppServerTransport, @unchecked Sendable {
+    private let transport: ProcessStdioTransport
+
+    nonisolated init() {
+        self.transport = ProcessStdioTransport(
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: [
+                "codex",
+                "app-server",
+                "--listen",
+                "stdio://"
+            ],
+            queueLabel: "com.codexisland.local-app-server-transport"
+        )
+    }
+
+    func start(
+        onStdoutLine: @escaping @Sendable (String) async -> Void,
+        onStderrLine: @escaping @Sendable (String) async -> Void,
+        onTermination: @escaping @Sendable (Int32) async -> Void
+    ) async throws {
+        try await transport.start(
+            onStdoutLine: onStdoutLine,
+            onStderrLine: onStderrLine,
+            onTermination: onTermination
+        )
+    }
+
+    func send(line: String) async throws {
+        try await transport.send(line: line)
+    }
+
+    func stop() async {
+        await transport.stop()
     }
 }
