@@ -65,6 +65,7 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
         try process.run()
         self.process = process
         self.stdinHandle = stdinPipe.fileHandleForWriting
+        configureNoSIGPIPE(for: stdinPipe.fileHandleForWriting)
         startReaders(
             stdout: stdoutPipe.fileHandleForReading,
             stderr: stderrPipe.fileHandleForReading,
@@ -128,6 +129,10 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
         }
         stderrSource.resume()
         self.stderrSource = stderrSource
+    }
+
+    private func configureNoSIGPIPE(for handle: FileHandle) {
+        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
     }
 
     private func drainStdout(

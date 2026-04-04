@@ -10,7 +10,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var screenObserver: ScreenObserver?
     private var updateCheckTimer: Timer?
     private var quitFallbackWorkItem: DispatchWorkItem?
-    private let isRunningTests = Foundation.ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    private let isRunningTests = AppLaunchContext.isRunningTests
+    private let isDebuggerAttached = AppLaunchContext.isDebuggerAttached
 
     static var shared: AppDelegate?
     let updater: SPUUpdater
@@ -30,6 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         super.init()
         AppDelegate.shared = self
+        AppLaunchContext.configureProcessSignals()
 
         if !isRunningTests {
             do {
@@ -87,8 +89,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleScreenChange()
         }
 
-        if updater.canCheckForUpdates {
+        let shouldAutomaticallyCheckForUpdates = AppLaunchContext.shouldAutomaticallyCheckForUpdates(
+            isRunningTests: isRunningTests,
+            isDebuggerAttached: isDebuggerAttached
+        )
+
+        if shouldAutomaticallyCheckForUpdates && updater.canCheckForUpdates {
             updater.checkForUpdates()
+        }
+
+        guard shouldAutomaticallyCheckForUpdates else {
+            return
         }
 
         updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
