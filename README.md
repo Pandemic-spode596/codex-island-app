@@ -57,13 +57,13 @@ Codex Island is a macOS notch and menu bar companion for Codex CLI. It keeps loc
 - Includes launch-at-login, screen selection, sound settings, and in-app updates.
 - Falls back gracefully on Macs without a physical notch.
 
-## What's New in 0.0.2
+## What's New in 0.0.3
 
-- Builds on the remote-host support already introduced in `0.0.1`.
-- Shows model details and remaining context directly in local and remote chat headers.
-- Makes remote `/new` and `/resume` thread flows more reliable, especially when multiple threads share the same SSH target and working directory.
-- Keeps remote diagnostics off by default; you can enable `Remote Debug Logs` from the menu when you need `remote-app-server.jsonl`.
-- Fixes the initial local `Open Session` blank-chat problem and several remote session opening / rebinding issues.
+- Moves much more of the local session flow onto a live local `codex app-server` connection instead of transcript-only fallback.
+- Adds local `/new` and `/resume`, so you can start a fresh local thread or reopen an older one from the app UI.
+- Surfaces local `/plan`, `/model`, and `/permissions` flows through the local app-server-backed chat experience.
+- Keeps local plan follow-up choices visible and answerable in the UI more reliably, including `<proposed_plan>`-style completions.
+- Tightens collapsed-notch status summaries, hover hit testing, prompt click handling, and debug-startup stability.
 
 ## Requirements
 
