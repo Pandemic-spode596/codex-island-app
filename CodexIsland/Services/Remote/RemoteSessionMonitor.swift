@@ -285,8 +285,19 @@ final class RemoteSessionMonitor: ObservableObject {
         preferredThreadBindings.removeValue(forKey: logicalSessionId)
     }
 
-    private func setPreferredThreadBinding(logicalSessionId: String, threadId: String) {
+    private func setPreferredThreadBinding(logicalSessionId: String, threadId: String, reason: String) {
         preferredThreadBindings[logicalSessionId] = threadId
+        if let hostId = threads.first(where: { $0.logicalSessionId == logicalSessionId })?.hostId {
+            Task {
+                await self.logMonitorEvent(
+                    level: .debug,
+                    hostId: hostId,
+                    threadId: threadId,
+                    message: "Updated preferred remote thread binding",
+                    payload: "logicalSessionId=\(logicalSessionId) threadId=\(threadId) reason=\(reason)"
+                )
+            }
+        }
     }
 
     private func clearPreferredThreadBindings(
@@ -349,6 +360,13 @@ final class RemoteSessionMonitor: ObservableObject {
         let inferredPhase = inferredVisiblePhase(for: thread).description
         let priority = visibleThreadPriority(for: thread)
         return "\(thread.id){status:\(thread.status),phase:\(inferredPhase),priority:\(priority),activeTurn:\(activeTurnId),updatedAt:\(thread.updatedAt)}"
+    }
+
+    private func rawThreadSummary(_ thread: RemoteAppServerThread) -> String {
+        let preview = thread.preview.replacingOccurrences(of: "\n", with: " ")
+        let compactPreview = String(preview.prefix(40))
+        let path = thread.path?.replacingOccurrences(of: "\n", with: " ") ?? "-"
+        return "\(thread.id){cwd:\(thread.cwd),path:\(path),status:\(thread.status),updatedAt:\(thread.updatedAt),preview:\(compactPreview)}"
     }
 
     private func retainedPreferredThreads(
@@ -683,7 +701,11 @@ final class RemoteSessionMonitor: ObservableObject {
                 cwd: thread.cwd
             )
             if pinPreferredBinding {
-                setPreferredThreadBinding(logicalSessionId: logicalSessionId, threadId: thread.id)
+                setPreferredThreadBinding(
+                    logicalSessionId: logicalSessionId,
+                    threadId: thread.id,
+                    reason: "thread-start"
+                )
             }
             upsertRawThread(hostId: hostId, thread: thread)
             refreshVisibleLogicalSession(hostId: hostId, logicalSessionId: logicalSessionId)
@@ -756,7 +778,11 @@ final class RemoteSessionMonitor: ObservableObject {
                 sshTarget: host.sshTarget,
                 cwd: thread.cwd
             )
-            setPreferredThreadBinding(logicalSessionId: logicalSessionId, threadId: thread.id)
+            setPreferredThreadBinding(
+                logicalSessionId: logicalSessionId,
+                threadId: thread.id,
+                reason: "open-thread"
+            )
             upsertRawThread(hostId: hostId, thread: thread)
             refreshVisibleLogicalSession(hostId: hostId, logicalSessionId: logicalSessionId)
             updateTurnContextSnapshot(
@@ -769,7 +795,8 @@ final class RemoteSessionMonitor: ObservableObject {
                 hostId: hostId,
                 method: "thread/resume",
                 threadId: thread.id,
-                message: "Opened remote thread"
+                message: "Opened remote thread",
+                payload: "logicalSessionId=\(logicalSessionId) rawStatus=\(thread.status)"
             )
             Task {
                 try? await connection.refreshThreads()
@@ -1146,6 +1173,16 @@ final class RemoteSessionMonitor: ObservableObject {
 
     private func applyThreadList(hostId: String, remoteThreads: [RemoteAppServerThread]) {
         let host = hosts.first(where: { $0.id == hostId })
+        let rawSummary = remoteThreads.map(rawThreadSummary).joined(separator: " | ")
+        Task {
+            await self.logMonitorEvent(
+                level: .debug,
+                hostId: hostId,
+                method: "thread/list",
+                message: "Applied remote raw thread list",
+                payload: "count=\(remoteThreads.count) threads=[\(rawSummary)]"
+            )
+        }
         let retainedThreads = retainedPreferredThreads(
             hostId: hostId,
             host: host,
@@ -1666,7 +1703,11 @@ final class RemoteSessionMonitor: ObservableObject {
             cwd: recoveredThread.cwd
         )
         if pinPreferredBinding {
-            setPreferredThreadBinding(logicalSessionId: logicalSessionId, threadId: recoveredThread.id)
+            setPreferredThreadBinding(
+                logicalSessionId: logicalSessionId,
+                threadId: recoveredThread.id,
+                reason: "recover-new-thread"
+            )
         }
         refreshVisibleLogicalSession(hostId: hostId, logicalSessionId: logicalSessionId)
         return threadState(hostId: hostId, threadId: recoveredThread.id) ??
