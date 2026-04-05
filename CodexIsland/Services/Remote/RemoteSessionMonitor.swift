@@ -179,6 +179,8 @@ final class RemoteSessionMonitor: ObservableObject {
     @Published private(set) var hostActionErrors: [String: String] = [:]
     @Published private(set) var hostActionInProgress: Set<String> = []
 
+    private let transcriptFallbackProvisionalBusyWindow: TimeInterval = 15
+
     private let saveHosts: ([RemoteHostConfig]) -> Void
     private let connectionFactory: (
         RemoteHostConfig,
@@ -1381,7 +1383,10 @@ final class RemoteSessionMonitor: ObservableObject {
             preview: thread.preview,
             name: thread.name,
             cwd: thread.cwd,
-            phase: phase(from: thread.status, pendingApproval: nil, activeTurnId: computedTurn?.id),
+            phase: initialVisiblePhase(
+                for: thread,
+                activeTurnId: computedTurn?.id
+            ),
             lastActivity: remoteDate(thread.updatedAt),
             createdAt: remoteDate(thread.createdAt),
             updatedAt: remoteDate(thread.updatedAt),
@@ -1404,7 +1409,40 @@ final class RemoteSessionMonitor: ObservableObject {
         if let index = threadIndex(logicalSessionId: logicalSessionId) {
             updateDerivedFields(at: index)
         }
+        if state.phase == .processing && thread.status == .idle && thread.turns.isEmpty {
+            Task {
+                await self.logMonitorEvent(
+                    level: .debug,
+                    hostId: hostId,
+                    method: "thread/list",
+                    threadId: thread.id,
+                    message: "Assigned provisional busy phase while transcript fallback resolves",
+                    payload: "status=\(thread.status) updatedAt=\(thread.updatedAt) path=\(thread.path ?? "-")"
+                )
+            }
+        }
         scheduleTranscriptFallbackSync(hostId: hostId, thread: thread)
+    }
+
+    private func initialVisiblePhase(
+        for thread: RemoteAppServerThread,
+        activeTurnId: String?
+    ) -> SessionPhase {
+        let rawPhase = phase(from: thread.status, pendingApproval: nil, activeTurnId: activeTurnId)
+        guard rawPhase == .idle else { return rawPhase }
+        guard activeTurnId == nil else { return rawPhase }
+        guard thread.turns.isEmpty else { return rawPhase }
+        guard let path = thread.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty else {
+            return rawPhase
+        }
+
+        let updatedAt = remoteDate(thread.updatedAt)
+        guard Date().timeIntervalSince(updatedAt) <= transcriptFallbackProvisionalBusyWindow else {
+            return rawPhase
+        }
+
+        return .processing
     }
 
     private func shouldPreserveVisiblePhase(

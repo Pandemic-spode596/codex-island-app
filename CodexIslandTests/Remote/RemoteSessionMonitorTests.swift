@@ -1060,6 +1060,46 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertFalse(second.canSendMessage)
     }
 
+    func testFreshIdleThreadStartsAsProcessingWhileTranscriptFallbackIsPending() {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "/repo", isEnabled: true)
+        let thread = RemoteAppServerThread(
+            id: "thread-1",
+            preview: "Existing",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 1_700_000_000,
+            updatedAt: Int(Date().timeIntervalSince1970),
+            status: .idle,
+            path: "/remote/thread-1.jsonl",
+            cwd: "/repo",
+            cliVersion: "1.0.0",
+            name: nil,
+            turns: []
+        )
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.startMonitoring()
+        monitor.apply(event: .connectionState(hostId: host.id, state: .connected))
+        monitor.apply(event: .threadList(hostId: host.id, threads: [thread]))
+
+        let inserted = try? XCTUnwrap(monitor.threads.first)
+        XCTAssertEqual(inserted?.phase, .processing)
+        XCTAssertFalse(inserted?.canSendMessage ?? true)
+    }
+
     func testStartFreshThreadBypassesLogicalSessionReuse() async throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
