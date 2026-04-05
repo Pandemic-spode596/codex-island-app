@@ -53,7 +53,7 @@ Codex Island is a macOS notch and menu bar companion for Codex CLI. It keeps loc
 - Shows recent conversation history with markdown rendering and active model/context details in chat headers.
 - Supports approval flows directly from the app UI.
 - Tracks multiple local sessions and remote threads, and lets you switch between them quickly.
-- Lets you save SSH targets, optional default working directories, and auto-connect remote hosts from the app.
+- Lets you save SSH targets, optional default working directories, auto-connect remote hosts, and pick from `~/.ssh/config` host aliases in the app.
 - Includes launch-at-login, screen selection, sound settings, and in-app updates.
 - Falls back gracefully on Macs without a physical notch.
 
@@ -94,7 +94,7 @@ The exported app bundle is written to `build/export/Codex Island.app`.
 
 ## Remote Hosts Over SSH
 
-Open `Remote Hosts` from the notch menu to add an SSH target, an optional default working directory, and an auto-connect preference for each remote machine.
+Open `Remote Hosts` from the notch menu to add an SSH target, an optional default working directory, and an auto-connect preference for each remote machine. The `SSH Target` field accepts raw `user@host`, plain hostnames, or aliases discovered from your local `~/.ssh/config`.
 
 When you connect a host, Codex Island launches:
 

@@ -10,6 +10,7 @@ import SwiftUI
 struct RemoteHostsView: View {
     @ObservedObject var viewModel: NotchViewModel
     @ObservedObject private var remoteSessionMonitor = RemoteSessionMonitor.shared
+    @StateObject private var sshConfigSuggestionStore = SSHConfigSuggestionStore()
 
     var body: some View {
         VStack(spacing: 8) {
@@ -31,6 +32,7 @@ struct RemoteHostsView: View {
                                 state: remoteSessionMonitor.hostStates[host.id] ?? .disconnected,
                                 actionError: remoteSessionMonitor.hostActionErrors[host.id],
                                 isStartingThread: remoteSessionMonitor.hostActionInProgress.contains(host.id),
+                                sshConfigSuggestions: sshConfigSuggestionStore.suggestions,
                                 onChange: { remoteSessionMonitor.updateHost($0) },
                                 onRemove: { remoteSessionMonitor.removeHost(id: host.id) },
                                 onConnect: { remoteSessionMonitor.connectHost(id: host.id) },
@@ -70,6 +72,9 @@ struct RemoteHostsView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear {
+            sshConfigSuggestionStore.refreshIfNeeded()
+        }
     }
 
     private var emptyState: some View {
@@ -92,6 +97,7 @@ private struct RemoteHostCard: View {
     let state: RemoteHostConnectionState
     let actionError: String?
     let isStartingThread: Bool
+    let sshConfigSuggestions: [SSHConfigHostSuggestion]
     let onChange: (RemoteHostConfig) -> Void
     let onRemove: () -> Void
     let onConnect: () -> Void
@@ -99,12 +105,20 @@ private struct RemoteHostCard: View {
     let onStartThread: () -> Void
 
     @State private var draft: RemoteHostConfig
+    @FocusState private var focusedField: FocusField?
+
+    private enum FocusField: Hashable {
+        case name
+        case sshTarget
+        case defaultCwd
+    }
 
     init(
         host: RemoteHostConfig,
         state: RemoteHostConnectionState,
         actionError: String?,
         isStartingThread: Bool,
+        sshConfigSuggestions: [SSHConfigHostSuggestion],
         onChange: @escaping (RemoteHostConfig) -> Void,
         onRemove: @escaping () -> Void,
         onConnect: @escaping () -> Void,
@@ -115,6 +129,7 @@ private struct RemoteHostCard: View {
         self.state = state
         self.actionError = actionError
         self.isStartingThread = isStartingThread
+        self.sshConfigSuggestions = sshConfigSuggestions
         self.onChange = onChange
         self.onRemove = onRemove
         self.onConnect = onConnect
@@ -138,9 +153,29 @@ private struct RemoteHostCard: View {
                     .lineLimit(1)
             }
 
-            hostField("Name", text: binding(\.name))
-            hostField("SSH Target", text: binding(\.sshTarget))
-            hostField("Default CWD", text: binding(\.defaultCwd), placeholder: "/path/on/remote")
+            hostField("Name", text: binding(\.name), focusField: .name)
+            hostField(
+                "SSH Target",
+                text: binding(\.sshTarget),
+                placeholder: "alias, user@host, or host",
+                focusField: .sshTarget
+            )
+
+            Text("Supports alias, user@host, or host. Suggestions come from ~/.ssh/config when available.")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.3))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if shouldShowSSHTargetSuggestions {
+                sshTargetSuggestionsView
+            }
+
+            hostField(
+                "Default CWD",
+                text: binding(\.defaultCwd),
+                placeholder: "/path/on/remote",
+                focusField: .defaultCwd
+            )
 
             Toggle(isOn: binding(\.isEnabled)) {
                 Text("Auto-connect")
@@ -235,12 +270,80 @@ private struct RemoteHostCard: View {
         }
     }
 
-    private func hostField(_ label: String, text: Binding<String>, placeholder: String? = nil) -> some View {
+    private var shouldShowSSHTargetSuggestions: Bool {
+        focusedField == .sshTarget && !filteredSSHTargetSuggestions.isEmpty
+    }
+
+    private var filteredSSHTargetSuggestions: [SSHConfigHostSuggestion] {
+        let query = draft.sshTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suggestions = sshConfigSuggestions.filter { $0.matches(query: query) }
+        return Array(suggestions.prefix(query.isEmpty ? 5 : 6))
+    }
+
+    private var sshTargetSuggestionsView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("From SSH Config")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.white.opacity(0.35))
+
+            VStack(spacing: 6) {
+                ForEach(filteredSSHTargetSuggestions) { suggestion in
+                    Button {
+                        draft.sshTarget = suggestion.alias
+                        onChange(draft)
+                        focusedField = nil
+                    } label: {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(suggestion.alias)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.92))
+
+                                if let summary = suggestion.resolutionSummary {
+                                    Text(summary)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.white.opacity(0.45))
+                                        .lineLimit(1)
+                                }
+                            }
+
+                            Spacer()
+
+                            if suggestion.alias == draft.sshTarget.trimmingCharacters(in: .whitespacesAndNewlines) {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(TerminalColors.green)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.04))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func hostField(
+        _ label: String,
+        text: Binding<String>,
+        placeholder: String? = nil,
+        focusField: FocusField
+    ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(.white.opacity(0.35))
             TextField(placeholder ?? label, text: text)
+                .focused($focusedField, equals: focusField)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.9))
