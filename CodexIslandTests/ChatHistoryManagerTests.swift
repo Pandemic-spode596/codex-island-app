@@ -130,6 +130,20 @@ final class ChatHistoryManagerTests: XCTestCase {
         XCTAssertEqual(renderableCounts.filter { $0 > 0 }.count, 2)
     }
 
+    func testErrorToolCallUsesFailureDisplayTextForCommand() {
+        let item = ToolCallItem(
+            name: "Command",
+            input: ["command": "false"],
+            status: .error,
+            result: "exit code 1",
+            structuredResult: nil,
+            subagentTools: []
+        )
+
+        XCTAssertEqual(item.statusDisplay.text, "Command failed")
+        XCTAssertFalse(item.statusDisplay.isRunning)
+    }
+
     private func makeHookEvent(
         sessionId: String,
         tty: String?,

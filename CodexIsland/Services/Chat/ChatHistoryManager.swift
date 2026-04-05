@@ -233,6 +233,9 @@ nonisolated struct ToolCallItem: Equatable, Sendable {
         if status == .waitingForApproval {
             return ToolStatusDisplay(text: "Waiting for approval...", isRunning: true)
         }
+        if status == .error {
+            return ToolStatusDisplay.failed(for: name, result: structuredResult)
+        }
         if status == .interrupted {
             return ToolStatusDisplay(text: "Interrupted", isRunning: false)
         }

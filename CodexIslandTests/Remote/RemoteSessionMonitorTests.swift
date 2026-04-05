@@ -593,6 +593,60 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertEqual(Set(monitor.threads.map(\.threadId)), Set(["thread-1", "thread-2"]))
     }
 
+    func testThreadListTreatsInProgressCommandItemAsProcessingEvenWhenThreadStatusIsIdle() {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "/repo", isEnabled: true)
+        let thread = makeThread(
+            id: "thread-1",
+            preview: "Repo",
+            status: .idle,
+            turns: [
+                makeTurn(
+                    id: "turn-1",
+                    items: [
+                        .commandExecution(
+                            id: "cmd-1",
+                            command: "npm run dev",
+                            cwd: "/repo",
+                            status: .inProgress,
+                            aggregatedOutput: nil
+                        )
+                    ],
+                    status: .completed
+                )
+            ],
+            cwd: "/repo"
+        )
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.startMonitoring()
+        monitor.apply(event: .threadList(hostId: host.id, threads: [thread]))
+
+        XCTAssertEqual(monitor.threads.count, 1)
+        XCTAssertEqual(monitor.threads.first?.phase, .processing)
+        XCTAssertEqual(monitor.threads.first?.activeTurnId, "turn-1")
+        XCTAssertEqual(monitor.threads.first?.history.last?.type, .toolCall(ToolCallItem(
+            name: "Command",
+            input: ["command": "npm run dev"],
+            status: .running,
+            result: nil,
+            structuredResult: nil,
+            subagentTools: []
+        )))
+    }
+
     func testStartThreadReturnsExistingLogicalSessionForSameCwd() async throws {
         final class CallTracker: @unchecked Sendable {
             var didCallStart = false

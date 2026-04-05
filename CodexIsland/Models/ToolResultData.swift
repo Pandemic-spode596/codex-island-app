@@ -263,6 +263,27 @@ nonisolated struct ToolStatusDisplay {
     let text: String
     let isRunning: Bool
 
+    private nonisolated static func genericFailureText(for toolName: String) -> String {
+        switch toolName {
+        case "Bash", "Command", "SlashCommand":
+            return "Command failed"
+        case "Edit":
+            return "Edit failed"
+        case "Write":
+            return "Write failed"
+        case "Read":
+            return "Read failed"
+        case "WebFetch":
+            return "Fetch failed"
+        case "WebSearch":
+            return "Search failed"
+        case "Task":
+            return "Agent failed"
+        default:
+            return "Failed"
+        }
+    }
+
     /// Get running status text for a tool
     nonisolated static func running(for toolName: String, input: [String: String]) -> ToolStatusDisplay {
         switch toolName {
@@ -376,6 +397,37 @@ nonisolated struct ToolStatusDisplay {
 
         case .generic:
             return ToolStatusDisplay(text: "Completed", isRunning: false)
+        }
+    }
+
+    /// Get failed status text for a tool result
+    nonisolated static func failed(for toolName: String, result: ToolResultData?) -> ToolStatusDisplay {
+        guard let result else {
+            return ToolStatusDisplay(text: genericFailureText(for: toolName), isRunning: false)
+        }
+
+        switch result {
+        case .bash(let r):
+            if let interpretation = r.returnCodeInterpretation, !interpretation.isEmpty {
+                return ToolStatusDisplay(text: interpretation, isRunning: false)
+            }
+            return ToolStatusDisplay(text: genericFailureText(for: toolName), isRunning: false)
+
+        case .bashOutput(let r):
+            return ToolStatusDisplay(text: "Status: \(r.status)", isRunning: false)
+
+        case .webFetch(let r):
+            return ToolStatusDisplay(text: "\(r.code) \(r.codeText)", isRunning: false)
+
+        case .task(let r):
+            return ToolStatusDisplay(text: r.status.capitalized, isRunning: false)
+
+        default:
+            let completedDisplay = completed(for: toolName, result: result)
+            if completedDisplay.text != "Completed" {
+                return completedDisplay
+            }
+            return ToolStatusDisplay(text: genericFailureText(for: toolName), isRunning: false)
         }
     }
 }

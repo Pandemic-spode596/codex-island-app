@@ -1150,7 +1150,7 @@ final class RemoteSessionMonitor: ObservableObject {
         let hostName = host?.displayName ?? "Remote Host"
         let connectionState = hostStates[hostId] ?? .disconnected
         let computedHistory = replaceHistory ? historyItems(from: thread.turns) : nil
-        let computedTurn = thread.turns.last(where: { $0.status == .inProgress })
+        let computedTurn = activeTurn(from: thread.turns)
         let logicalSessionId = logicalSessionId(
             sshTarget: host?.sshTarget ?? "",
             cwd: thread.cwd
@@ -1498,7 +1498,7 @@ final class RemoteSessionMonitor: ObservableObject {
 
         let host = hosts.first(where: { $0.id == hostId })
         let connectionState = hostStates[hostId] ?? .disconnected
-        let computedTurn = thread.turns.last(where: { $0.status == .inProgress })
+        let computedTurn = activeTurn(from: thread.turns)
 
         return RemoteThreadState(
             hostId: hostId,
@@ -1732,6 +1732,27 @@ final class RemoteSessionMonitor: ObservableObject {
             return value
         } + lines
         return parts.joined(separator: "\n")
+    }
+
+    private func activeTurn(from turns: [RemoteAppServerTurn]) -> RemoteAppServerTurn? {
+        turns.last(where: isActiveTurn)
+    }
+
+    private func isActiveTurn(_ turn: RemoteAppServerTurn) -> Bool {
+        if turn.status == .inProgress {
+            return true
+        }
+
+        return turn.items.contains { item in
+            switch item {
+            case .commandExecution(_, _, _, let status, _):
+                return status == .inProgress
+            case .fileChange(_, _, let status):
+                return status == .inProgress
+            default:
+                return false
+            }
+        }
     }
 
     private func mergeOptimisticUserMessageIfNeeded(item: ChatHistoryItem, threadIndex: Int) {
