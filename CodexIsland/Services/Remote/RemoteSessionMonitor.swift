@@ -324,11 +324,7 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     private func visibleThreadPriority(for thread: RemoteAppServerThread) -> Int {
-        let currentPhase = phase(
-            from: thread.status,
-            pendingApproval: nil,
-            activeTurnId: activeTurn(from: thread.turns)?.id
-        )
+        let currentPhase = inferredVisiblePhase(for: thread)
 
         switch currentPhase {
         case .waitingForApproval, .processing, .compacting:
@@ -338,6 +334,21 @@ final class RemoteSessionMonitor: ObservableObject {
         case .idle, .ended:
             return 0
         }
+    }
+
+    private func inferredVisiblePhase(for thread: RemoteAppServerThread) -> SessionPhase {
+        phase(
+            from: thread.status,
+            pendingApproval: nil,
+            activeTurnId: activeTurn(from: thread.turns)?.id
+        )
+    }
+
+    private func visibleThreadCandidateSummary(_ thread: RemoteAppServerThread) -> String {
+        let activeTurnId = activeTurn(from: thread.turns)?.id ?? "-"
+        let inferredPhase = inferredVisiblePhase(for: thread).description
+        let priority = visibleThreadPriority(for: thread)
+        return "\(thread.id){status:\(thread.status),phase:\(inferredPhase),priority:\(priority),activeTurn:\(activeTurnId),updatedAt:\(thread.updatedAt)}"
     }
 
     private func retainedPreferredThreads(
@@ -1158,6 +1169,36 @@ final class RemoteSessionMonitor: ObservableObject {
             clearPreferredThreadBinding(logicalSessionId: logicalSessionId)
             guard let latestThread = latestThread(from: visibleCandidates) else { return }
             selectedThread = latestThread
+        }
+
+        let selectedPhase = inferredVisiblePhase(for: selectedThread)
+        let hasCompetingCandidates = visibleCandidates.count > 1
+        let preferredThreadId = preferredThreadBindings[logicalSessionId]
+        if hasCompetingCandidates || selectedPhase == .idle {
+            let candidateSummary = visibleCandidates
+                .sorted { lhs, rhs in
+                    let lhsPriority = visibleThreadPriority(for: lhs)
+                    let rhsPriority = visibleThreadPriority(for: rhs)
+                    if lhsPriority != rhsPriority {
+                        return lhsPriority > rhsPriority
+                    }
+                    if lhs.updatedAt != rhs.updatedAt {
+                        return lhs.updatedAt > rhs.updatedAt
+                    }
+                    return lhs.createdAt > rhs.createdAt
+                }
+                .map(visibleThreadCandidateSummary)
+                .joined(separator: " | ")
+
+            Task {
+                await self.logMonitorEvent(
+                    level: .debug,
+                    hostId: hostId,
+                    threadId: selectedThread.id,
+                    message: "Resolved visible remote thread",
+                    payload: "logicalSessionId=\(logicalSessionId) preferred=\(preferredThreadId ?? "-") selected=\(selectedThread.id) selectedPhase=\(selectedPhase.description) candidates=[\(candidateSummary)]"
+                )
+            }
         }
 
         upsertVisibleThread(
