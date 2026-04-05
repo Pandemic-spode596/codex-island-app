@@ -32,6 +32,13 @@ enum RemoteConnectionEvent: Sendable {
     case threadError(hostId: String, threadId: String, turnId: String?, message: String, willRetry: Bool)
 }
 
+nonisolated struct RemoteTranscriptFallbackSnapshot: Sendable {
+    let history: [ChatHistoryItem]
+    let pendingInteractions: [PendingInteraction]
+    let transcriptPhase: SessionPhase?
+    let runtimeInfo: SessionRuntimeInfo
+}
+
 enum RemoteSessionError: LocalizedError {
     case notConnected
     case missingThread
@@ -75,6 +82,11 @@ nonisolated protocol RemoteAppServerConnectionProtocol: Sendable {
     func refreshThreads() async throws
     func listModels(includeHidden: Bool) async throws -> [RemoteAppServerModel]
     func listCollaborationModes() async throws -> [RemoteAppServerCollaborationModeMask]
+    func loadTranscriptFallbackSnapshot(
+        sessionId: String,
+        transcriptPath: String,
+        maxLines: Int
+    ) async throws -> RemoteTranscriptFallbackSnapshot?
 }
 
 extension RemoteAppServerConnectionProtocol {
@@ -181,6 +193,7 @@ final class RemoteSessionMonitor: ObservableObject {
     private var optimisticUserMessages: [OptimisticRemoteUserMessage] = []
     private var rawThreadsByHost: [String: [String: RemoteAppServerThread]] = [:]
     private var preferredThreadBindings: [String: String] = [:]
+    private var transcriptSyncTasks: [String: Task<Void, Never>] = [:]
 
     init(
         initialHosts: [RemoteHostConfig]? = nil,
@@ -1331,6 +1344,7 @@ final class RemoteSessionMonitor: ObservableObject {
                 pendingApproval: previousPendingApproval ?? threads[index].pendingApproval,
                 activeTurnId: threads[index].activeTurnId
             )
+            scheduleTranscriptFallbackSync(hostId: hostId, thread: thread)
             return
         }
 
@@ -1364,6 +1378,93 @@ final class RemoteSessionMonitor: ObservableObject {
         threads.append(state)
         if let index = threadIndex(logicalSessionId: logicalSessionId) {
             updateDerivedFields(at: index)
+        }
+        scheduleTranscriptFallbackSync(hostId: hostId, thread: thread)
+    }
+
+    private func scheduleTranscriptFallbackSync(hostId: String, thread: RemoteAppServerThread) {
+        guard let transcriptPath = thread.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !transcriptPath.isEmpty,
+              let connection = connections[hostId] else {
+            return
+        }
+
+        let inferredPhase = inferredVisiblePhase(for: thread)
+        let shouldSync = inferredPhase == .idle || inferredPhase == .waitingForInput
+        guard shouldSync else { return }
+
+        let key = "\(hostId):\(thread.id)"
+        guard transcriptSyncTasks[key] == nil else { return }
+
+        transcriptSyncTasks[key] = Task { [weak self] in
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.transcriptSyncTasks.removeValue(forKey: key)
+                }
+            }
+
+            do {
+                let snapshot = try await connection.loadTranscriptFallbackSnapshot(
+                    sessionId: thread.id,
+                    transcriptPath: transcriptPath,
+                    maxLines: 400
+                )
+                await MainActor.run {
+                    self?.applyTranscriptFallback(hostId: hostId, threadId: thread.id, snapshot: snapshot)
+                }
+            } catch {
+                await self?.logMonitorEvent(
+                    level: .warning,
+                    hostId: hostId,
+                    method: "transcript-fallback",
+                    threadId: thread.id,
+                    message: "Failed to load remote transcript fallback snapshot",
+                    payload: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func applyTranscriptFallback(
+        hostId: String,
+        threadId: String,
+        snapshot: RemoteTranscriptFallbackSnapshot?
+    ) {
+        guard let snapshot,
+              let index = threadIndex(hostId: hostId, threadId: threadId) else {
+            return
+        }
+
+        let currentPhase = threads[index].phase
+        let transcriptPhase = snapshot.transcriptPhase
+        let shouldOverridePhase = transcriptPhase != nil && (
+            currentPhase == .idle ||
+            (threads[index].turnContext.collaborationMode?.mode == .plan &&
+             threads[index].primaryPendingInteraction == nil)
+        )
+
+        if !snapshot.pendingInteractions.isEmpty {
+            threads[index].pendingInteractions = snapshot.pendingInteractions
+        }
+
+        if let transcriptPhase, shouldOverridePhase {
+            threads[index].phase = transcriptPhase
+        }
+
+        let shouldReplaceHistory =
+            !snapshot.history.isEmpty &&
+            (threads[index].history.isEmpty ||
+             !snapshot.pendingInteractions.isEmpty ||
+             (threads[index].turnContext.collaborationMode?.mode == .plan && currentPhase == .idle))
+
+        if shouldReplaceHistory {
+            threads[index].history = snapshot.history
+            updateDerivedFields(at: index)
+        }
+
+        if threads[index].primaryPendingInteraction != nil || shouldOverridePhase {
+            threads[index].updatedAt = Date()
+            threads[index].lastActivity = Date()
         }
     }
 
@@ -2320,6 +2421,45 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
         return response.data
     }
 
+    func loadTranscriptFallbackSnapshot(
+        sessionId: String,
+        transcriptPath: String,
+        maxLines: Int
+    ) async throws -> RemoteTranscriptFallbackSnapshot? {
+        let trimmedPath = transcriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return nil }
+
+        let content: String
+        if host.sshTarget == "local-app-server" {
+            guard let data = FileManager.default.contents(atPath: trimmedPath),
+                  let decoded = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            content = decoded
+        } else {
+            let command = "tail -n \(max(50, maxLines)) -- \(shellQuoted(trimmedPath))"
+            content = try await dependencies.processExecutor.run("/usr/bin/ssh", arguments: [
+                "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                host.sshTarget,
+                command
+            ])
+        }
+
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let parsed = await CodexConversationParser.shared.parseContent(sessionId: sessionId, content: content)
+        return RemoteTranscriptFallbackSnapshot(
+            history: parsed.history,
+            pendingInteractions: parsed.pendingInteractions,
+            transcriptPhase: parsed.transcriptPhase,
+            runtimeInfo: parsed.runtimeInfo
+        )
+    }
+
     private func initialize() async throws {
         _ = try await request(
             method: "initialize",
@@ -3088,6 +3228,10 @@ actor RemoteAppServerConnection: RemoteAppServerConnectionProtocol {
 
     private func stringValue(forKey key: String, in params: [String: Any]) -> String? {
         params[key] as? String
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
     private func payloadString(from value: AnyCodable?) -> String? {

@@ -190,7 +190,7 @@ struct RemoteChatView: View {
             if let pendingInteraction {
                 PendingInteractionBar(
                     interaction: pendingInteraction,
-                    canRespondInline: true,
+                    canRespondInline: !pendingInteraction.transport.isLocalCodex,
                     canOpenTerminal: false,
                     onApprovalAction: { action in
                         respondToApproval(action)

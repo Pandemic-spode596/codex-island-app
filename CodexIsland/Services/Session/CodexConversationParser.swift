@@ -10,6 +10,13 @@ import Foundation
 actor CodexConversationParser {
     static let shared = CodexConversationParser()
 
+    nonisolated struct ParsedHistorySnapshot: Sendable {
+        let history: [ChatHistoryItem]
+        let pendingInteractions: [PendingInteraction]
+        let transcriptPhase: SessionPhase?
+        let runtimeInfo: SessionRuntimeInfo
+    }
+
     private struct Snapshot {
         let modificationDate: Date
         let messages: [ChatMessage]
@@ -109,6 +116,21 @@ actor CodexConversationParser {
         loadSnapshot(sessionId: sessionId, transcriptPath: transcriptPath)?.transcriptPhase
     }
 
+    func parseContent(sessionId: String, content: String) -> ParsedHistorySnapshot {
+        let snapshot = buildSnapshot(content: content, modificationDate: Date())
+        return ParsedHistorySnapshot(
+            history: buildHistoryItems(
+                messages: snapshot.messages,
+                completedToolIds: snapshot.completedToolIds,
+                toolResults: snapshot.toolResults,
+                structuredResults: snapshot.structuredResults
+            ),
+            pendingInteractions: snapshot.pendingInteractions,
+            transcriptPhase: snapshot.transcriptPhase,
+            runtimeInfo: snapshot.runtimeInfo
+        )
+    }
+
     private func loadSnapshot(sessionId: String, transcriptPath: String?) -> Snapshot? {
         guard let transcriptPath,
               FileManager.default.fileExists(atPath: transcriptPath),
@@ -134,25 +156,15 @@ actor CodexConversationParser {
     private func buildSnapshot(transcriptPath: String, modificationDate: Date) -> Snapshot {
         guard let data = FileManager.default.contents(atPath: transcriptPath),
               let content = String(data: data, encoding: .utf8) else {
-            return Snapshot(
-                modificationDate: modificationDate,
-                messages: [],
-                messageIds: [],
-                completedToolIds: [],
-                toolResults: [:],
-                structuredResults: [:],
-                pendingInteractions: [],
-                transcriptPhase: nil,
-                conversationInfo: ConversationInfo(
-                    summary: nil,
-                    lastMessage: nil,
-                    lastMessageRole: nil,
-                    lastToolName: nil,
-                    firstUserMessage: nil,
-                    lastUserMessageDate: nil
-                ),
-                runtimeInfo: .empty
-            )
+            return emptySnapshot(modificationDate: modificationDate)
+        }
+
+        return buildSnapshot(content: content, modificationDate: modificationDate)
+    }
+
+    private func buildSnapshot(content: String, modificationDate: Date) -> Snapshot {
+        guard !content.isEmpty else {
+            return emptySnapshot(modificationDate: modificationDate)
         }
 
         var messages: [ChatMessage] = []
@@ -246,6 +258,89 @@ actor CodexConversationParser {
             conversationInfo: conversationInfo,
             runtimeInfo: runtimeInfo
         )
+    }
+
+    private func emptySnapshot(modificationDate: Date) -> Snapshot {
+        Snapshot(
+            modificationDate: modificationDate,
+            messages: [],
+            messageIds: [],
+            completedToolIds: [],
+            toolResults: [:],
+            structuredResults: [:],
+            pendingInteractions: [],
+            transcriptPhase: nil,
+            conversationInfo: ConversationInfo(
+                summary: nil,
+                lastMessage: nil,
+                lastMessageRole: nil,
+                lastToolName: nil,
+                firstUserMessage: nil,
+                lastUserMessageDate: nil
+            ),
+            runtimeInfo: .empty
+        )
+    }
+
+    private func buildHistoryItems(
+        messages: [ChatMessage],
+        completedToolIds: Set<String>,
+        toolResults: [String: ConversationParser.ToolResult],
+        structuredResults: [String: ToolResultData]
+    ) -> [ChatHistoryItem] {
+        var items: [ChatHistoryItem] = []
+
+        for message in messages {
+            for (blockIndex, block) in message.content.enumerated() {
+                switch block {
+                case .text(let text):
+                    let itemId = "\(message.id)-text-\(blockIndex)"
+                    let itemType: ChatHistoryItemType = message.role == .user ? .user(text) : .assistant(text)
+                    items.append(ChatHistoryItem(id: itemId, type: itemType, timestamp: message.timestamp))
+
+                case .thinking(let text):
+                    let itemId = "\(message.id)-thinking-\(blockIndex)"
+                    items.append(ChatHistoryItem(id: itemId, type: .thinking(text), timestamp: message.timestamp))
+
+                case .interrupted:
+                    let itemId = "\(message.id)-interrupted-\(blockIndex)"
+                    items.append(ChatHistoryItem(id: itemId, type: .interrupted, timestamp: message.timestamp))
+
+                case .toolUse(let tool):
+                    let isCompleted = completedToolIds.contains(tool.id)
+                    let status: ToolStatus = isCompleted ? .success : .running
+                    let resultText: String?
+                    if isCompleted, let parserResult = toolResults[tool.id] {
+                        if let stdout = parserResult.stdout, !stdout.isEmpty {
+                            resultText = stdout
+                        } else if let stderr = parserResult.stderr, !stderr.isEmpty {
+                            resultText = stderr
+                        } else if let content = parserResult.content, !content.isEmpty {
+                            resultText = content
+                        } else {
+                            resultText = nil
+                        }
+                    } else {
+                        resultText = nil
+                    }
+
+                    items.append(ChatHistoryItem(
+                        id: tool.id,
+                        type: .toolCall(ToolCallItem(
+                            name: tool.name,
+                            input: tool.input,
+                            status: status,
+                            result: resultText,
+                            structuredResult: structuredResults[tool.id],
+                            subagentTools: []
+                        )),
+                        timestamp: message.timestamp
+                    ))
+                }
+            }
+        }
+
+        return items.sorted { $0.timestamp < $1.timestamp }
     }
 
     private func updateRuntimeInfo(_ runtimeInfo: inout SessionRuntimeInfo, sessionMetaPayload: [String: Any]) {

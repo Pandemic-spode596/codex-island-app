@@ -933,6 +933,77 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertEqual(opened.phase, .waitingForInput)
     }
 
+    func testThreadListAppliesTranscriptFallbackWhenAppServerSnapshotIsIdle() async throws {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "/repo", isEnabled: true)
+        let thread = makeThread(
+            id: "thread-1",
+            preview: "Existing",
+            status: .idle,
+            turns: [],
+            cwd: "/repo",
+            path: "/remote/thread-1.jsonl"
+        )
+
+        connection.transcriptSnapshotHandler = { _, _, _ in
+            RemoteTranscriptFallbackSnapshot(
+                history: [
+                    ChatHistoryItem(id: "assistant-1", type: .assistant("plan body"), timestamp: Date())
+                ],
+                pendingInteractions: [
+                    .userInput(PendingUserInputInteraction(
+                        id: "plan-choice",
+                        title: "Codex needs your input",
+                        questions: [
+                            PendingInteractionQuestion(
+                                id: "plan_mode_followup",
+                                header: "Next step",
+                                question: "Implement this plan?",
+                                options: [
+                                    PendingInteractionOption(label: "Yes", description: nil),
+                                    PendingInteractionOption(label: "No", description: nil)
+                                ],
+                                isOther: false,
+                                isSecret: false
+                            )
+                        ],
+                        transport: .codexLocal(callId: nil, turnId: "turn-1")
+                    ))
+                ],
+                transcriptPhase: .waitingForInput,
+                runtimeInfo: .empty
+            )
+        }
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.startMonitoring()
+        monitor.apply(event: .connectionState(hostId: host.id, state: .connected))
+        monitor.apply(event: .threadList(hostId: host.id, threads: [thread]))
+
+        try await waitUntil {
+            let updated = await MainActor.run { monitor.threads.first }
+            guard let updated else { return false }
+            return updated.phase == .waitingForInput && updated.primaryPendingInteraction != nil && !updated.canSendMessage
+        }
+
+        let updated = try XCTUnwrap(monitor.threads.first)
+        XCTAssertEqual(updated.phase, .waitingForInput)
+        XCTAssertEqual(updated.history.last?.type, .assistant("plan body"))
+        XCTAssertFalse(updated.canSendMessage)
+    }
+
     func testStartFreshThreadBypassesLogicalSessionReuse() async throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
