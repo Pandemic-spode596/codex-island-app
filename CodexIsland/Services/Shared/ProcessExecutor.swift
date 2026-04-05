@@ -80,29 +80,32 @@ actor ProcessExecutor: ProcessExecuting {
 
             do {
                 try process.run()
-                process.waitUntilExit()
+                Task.detached {
+                    let (stdoutData, stderrData, terminationStatus) = Self.collectOutput(
+                        process: process,
+                        stdoutPipe: stdoutPipe,
+                        stderrPipe: stderrPipe
+                    )
 
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                    let stderr = String(data: stderrData, encoding: .utf8)
 
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8)
-
-                let result = ProcessResult(
-                    output: stdout,
-                    exitCode: process.terminationStatus,
-                    stderr: stderr
-                )
-
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: .success(result))
-                } else {
-                    Self.logger.warning("Command failed: \(executable) \(arguments.joined(separator: " "), privacy: .public) - exit code \(process.terminationStatus)")
-                    continuation.resume(returning: .failure(.executionFailed(
-                        command: executable,
-                        exitCode: process.terminationStatus,
+                    let result = ProcessResult(
+                        output: stdout,
+                        exitCode: terminationStatus,
                         stderr: stderr
-                    )))
+                    )
+
+                    if terminationStatus == 0 {
+                        continuation.resume(returning: .success(result))
+                    } else {
+                        Self.logger.warning("Command failed: \(executable) \(arguments.joined(separator: " "), privacy: .public) - exit code \(terminationStatus)")
+                        continuation.resume(returning: .failure(.executionFailed(
+                            command: executable,
+                            exitCode: terminationStatus,
+                            stderr: stderr
+                        )))
+                    }
                 }
             } catch let error as NSError {
                 if error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
@@ -133,20 +136,22 @@ actor ProcessExecutor: ProcessExecuting {
 
         do {
             try process.run()
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
+            let (stdoutData, stderrData, terminationStatus) = Self.collectOutput(
+                process: process,
+                stdoutPipe: stdoutPipe,
+                stderrPipe: stderrPipe
+            )
 
             let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
             let stderr = String(data: stderrData, encoding: .utf8)
 
-            if process.terminationStatus == 0 {
+            if terminationStatus == 0 {
                 return .success(stdout)
             } else {
-                Self.logger.warning("Sync command failed: \(executable, privacy: .public) - exit code \(process.terminationStatus)")
+                Self.logger.warning("Sync command failed: \(executable, privacy: .public) - exit code \(terminationStatus)")
                 return .failure(.executionFailed(
                     command: executable,
-                    exitCode: process.terminationStatus,
+                    exitCode: terminationStatus,
                     stderr: stderr
                 ))
             }
@@ -162,6 +167,40 @@ actor ProcessExecutor: ProcessExecuting {
             Self.logger.error("Sync command launch failed: \(executable, privacy: .public) - \(error.localizedDescription, privacy: .public)")
             return .failure(.launchFailed(command: executable, underlying: error))
         }
+    }
+
+    nonisolated private static func collectOutput(
+        process: Process,
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe
+    ) -> (stdout: Data, stderr: Data, terminationStatus: Int32) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var stdoutData = Data()
+        var stderrData = Data()
+
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            lock.lock()
+            stdoutData = data
+            lock.unlock()
+            group.leave()
+        }
+
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            lock.lock()
+            stderrData = data
+            lock.unlock()
+            group.leave()
+        }
+
+        process.waitUntilExit()
+        group.wait()
+
+        return (stdoutData, stderrData, process.terminationStatus)
     }
 }
 
