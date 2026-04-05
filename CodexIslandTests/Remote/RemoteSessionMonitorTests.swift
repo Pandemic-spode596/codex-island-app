@@ -3,6 +3,105 @@ import XCTest
 
 @MainActor
 final class RemoteSessionMonitorTests: XCTestCase {
+    func testUpdateHostClearsOldThreadsWhenSSHTargetChanges() async throws {
+        let logger = TestDiagnosticsLogger()
+        let originalHost = RemoteHostConfig(
+            id: "host-1",
+            name: "Old",
+            sshTarget: "cd",
+            defaultCwd: "/repo",
+            isEnabled: true
+        )
+        let updatedHost = RemoteHostConfig(
+            id: "host-1",
+            name: "New",
+            sshTarget: "100.114.242.113",
+            defaultCwd: "/repo",
+            isEnabled: true
+        )
+        let oldConnection = FakeRemoteConnection()
+        let newConnection = FakeRemoteConnection()
+        let oldThread = makeThread(id: "thread-old", preview: "Old Session", cwd: "/repo")
+        var factoryCalls = 0
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [originalHost],
+            loadHosts: { [originalHost] in [originalHost] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { host, emit in
+                factoryCalls += 1
+                if factoryCalls == 1 {
+                    oldConnection.emit = emit
+                    return oldConnection
+                }
+                XCTAssertEqual(host.sshTarget, updatedHost.sshTarget)
+                newConnection.emit = emit
+                return newConnection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.startMonitoring()
+        monitor.apply(event: .connectionState(hostId: originalHost.id, state: .connected))
+        monitor.apply(event: .threadUpsert(hostId: originalHost.id, thread: oldThread))
+
+        XCTAssertEqual(monitor.threads.count, 1)
+        XCTAssertEqual(monitor.threads.first?.threadId, "thread-old")
+
+        monitor.updateHost(updatedHost)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(oldConnection.stopCalled)
+        XCTAssertTrue(newConnection.startCalled)
+        XCTAssertTrue(monitor.threads.isEmpty)
+        XCTAssertEqual(monitor.hostStates[originalHost.id], .disconnected)
+        XCTAssertNil(monitor.hostActionErrors[originalHost.id])
+    }
+
+    func testUpdateHostKeepsThreadsWhenOnlyNameChanges() async {
+        let logger = TestDiagnosticsLogger()
+        let originalHost = RemoteHostConfig(
+            id: "host-1",
+            name: "Old",
+            sshTarget: "cd",
+            defaultCwd: "/repo",
+            isEnabled: true
+        )
+        let renamedHost = RemoteHostConfig(
+            id: "host-1",
+            name: "Renamed",
+            sshTarget: "cd",
+            defaultCwd: "/repo",
+            isEnabled: true
+        )
+        let connection = FakeRemoteConnection()
+        let oldThread = makeThread(id: "thread-old", preview: "Old Session", cwd: "/repo")
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [originalHost],
+            loadHosts: { [originalHost] in [originalHost] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.startMonitoring()
+        monitor.apply(event: .connectionState(hostId: originalHost.id, state: .connected))
+        monitor.apply(event: .threadUpsert(hostId: originalHost.id, thread: oldThread))
+
+        monitor.updateHost(renamedHost)
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertFalse(connection.stopCalled)
+        XCTAssertEqual(monitor.threads.count, 1)
+        XCTAssertEqual(monitor.threads.first?.threadId, "thread-old")
+    }
+
     func testStartThreadRecoversNewThreadAfterTimeout() async throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()

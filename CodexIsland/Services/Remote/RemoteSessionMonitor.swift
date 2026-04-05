@@ -208,6 +208,10 @@ final class RemoteSessionMonitor: ObservableObject {
         sshTarget.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    private func hasEquivalentRemoteEndpoint(_ lhs: RemoteHostConfig, _ rhs: RemoteHostConfig) -> Bool {
+        normalizeSSHIdentity(lhs.sshTarget) == normalizeSSHIdentity(rhs.sshTarget)
+    }
+
     private func normalizeCwdIdentity(_ cwd: String) -> String {
         let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
@@ -257,6 +261,26 @@ final class RemoteSessionMonitor: ObservableObject {
         optimisticUserMessages.removeAll { $0.hostId == hostId }
     }
 
+    private func resetHostRuntimeState(
+        hostId: String,
+        clearConnectionState: Bool,
+        additionalSSHIdentities: [String] = []
+    ) {
+        hostActionTasks[hostId]?.cancel()
+        hostActionTasks.removeValue(forKey: hostId)
+        hostActionInProgress.remove(hostId)
+        hostActionErrors.removeValue(forKey: hostId)
+        hostThreadFilterTasks[hostId]?.cancel()
+        hostThreadFilterTasks.removeValue(forKey: hostId)
+        hostThreadFilters.removeValue(forKey: hostId)
+        clearPreferredThreadBindings(for: hostId, additionalSSHIdentities: additionalSSHIdentities)
+        threads.removeAll { $0.hostId == hostId }
+        removeRawThreads(hostId: hostId)
+        if clearConnectionState {
+            hostStates[hostId] = .disconnected
+        }
+    }
+
     private func clearPreferredThreadBinding(logicalSessionId: String) {
         preferredThreadBindings.removeValue(forKey: logicalSessionId)
     }
@@ -265,15 +289,21 @@ final class RemoteSessionMonitor: ObservableObject {
         preferredThreadBindings[logicalSessionId] = threadId
     }
 
-    private func clearPreferredThreadBindings(for hostId: String) {
-        let hostLogicalIds = Set(
-            rawThreads(hostId: hostId).map { rawThread in
-                logicalSessionId(
-                    sshTarget: hosts.first(where: { $0.id == hostId })?.sshTarget ?? "",
-                    cwd: rawThread.cwd
-                )
-            } + threads.filter { $0.hostId == hostId }.map(\.logicalSessionId)
+    private func clearPreferredThreadBindings(
+        for hostId: String,
+        additionalSSHIdentities: [String] = []
+    ) {
+        let sshTargets = Set(
+            ([hosts.first(where: { $0.id == hostId })?.sshTarget] + additionalSSHIdentities)
+                .compactMap { $0 }
+                .map(normalizeSSHIdentity)
         )
+        let rawLogicalIds = rawThreads(hostId: hostId).flatMap { rawThread in
+            sshTargets.map { sshTarget in
+                logicalSessionId(sshTarget: sshTarget, cwd: rawThread.cwd)
+            }
+        }
+        let hostLogicalIds = Set(rawLogicalIds + threads.filter { $0.hostId == hostId }.map(\.logicalSessionId))
         for logicalSessionId in hostLogicalIds {
             preferredThreadBindings.removeValue(forKey: logicalSessionId)
         }
@@ -481,12 +511,26 @@ final class RemoteSessionMonitor: ObservableObject {
     func updateHost(_ host: RemoteHostConfig) {
         guard let index = hosts.firstIndex(where: { $0.id == host.id }) else { return }
         let previous = hosts[index]
+        let endpointChanged = !hasEquivalentRemoteEndpoint(previous, host)
+
+        if endpointChanged, let connection = connections.removeValue(forKey: host.id) {
+            Task { await connection.stop() }
+        }
+
+        if endpointChanged {
+            resetHostRuntimeState(
+                hostId: host.id,
+                clearConnectionState: true,
+                additionalSSHIdentities: [previous.sshTarget, host.sshTarget]
+            )
+        }
+
         hosts[index] = host
         saveHosts(hosts)
-        resolveThreadFilter(for: host)
 
         let connectionState = hostStates[host.id] ?? .disconnected
-        let shouldSync = previous.isEnabled != host.isEnabled || !connectionState.isConnected
+        let shouldSync = endpointChanged || previous.isEnabled != host.isEnabled || !connectionState.isConnected
+        resolveThreadFilter(for: host)
         if shouldSync {
             syncConnections()
         }
@@ -879,13 +923,7 @@ final class RemoteSessionMonitor: ObservableObject {
         for (id, connection) in connections where enabledHosts[id] == nil {
             Task { await connection.stop() }
             connections.removeValue(forKey: id)
-            hostStates[id] = .disconnected
-            clearPreferredThreadBindings(for: id)
-            threads.removeAll { $0.hostId == id }
-            removeRawThreads(hostId: id)
-            hostThreadFilters.removeValue(forKey: id)
-            hostThreadFilterTasks[id]?.cancel()
-            hostThreadFilterTasks.removeValue(forKey: id)
+            resetHostRuntimeState(hostId: id, clearConnectionState: true)
         }
 
         for (id, host) in enabledHosts {
