@@ -1004,6 +1004,62 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertFalse(updated.canSendMessage)
     }
 
+    func testIdleThreadListDoesNotOverrideFreshTranscriptProcessingState() async throws {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "/repo", isEnabled: true)
+        let thread = makeThread(
+            id: "thread-1",
+            preview: "Existing",
+            status: .idle,
+            turns: [],
+            cwd: "/repo",
+            path: "/remote/thread-1.jsonl"
+        )
+
+        connection.transcriptSnapshotHandler = { _, _, _ in
+            RemoteTranscriptFallbackSnapshot(
+                history: [
+                    ChatHistoryItem(id: "assistant-1", type: .assistant("still running"), timestamp: Date())
+                ],
+                pendingInteractions: [],
+                transcriptPhase: .processing,
+                runtimeInfo: .empty
+            )
+        }
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.startMonitoring()
+        monitor.apply(event: .connectionState(hostId: host.id, state: .connected))
+        monitor.apply(event: .threadList(hostId: host.id, threads: [thread]))
+
+        try await waitUntil {
+            let updated = await MainActor.run { monitor.threads.first }
+            return updated?.phase == .processing
+        }
+
+        let first = try XCTUnwrap(monitor.threads.first)
+        XCTAssertEqual(first.phase, .processing)
+        XCTAssertFalse(first.canSendMessage)
+
+        monitor.apply(event: .threadList(hostId: host.id, threads: [thread]))
+
+        let second = try XCTUnwrap(monitor.threads.first)
+        XCTAssertEqual(second.phase, .processing)
+        XCTAssertFalse(second.canSendMessage)
+    }
+
     func testStartFreshThreadBypassesLogicalSessionReuse() async throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()

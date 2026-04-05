@@ -1300,6 +1300,9 @@ final class RemoteSessionMonitor: ObservableObject {
         if let index = threadIndex(logicalSessionId: logicalSessionId) {
             let isRebindingRawThread = threads[index].threadId != thread.id
             let previousThreadId = threads[index].threadId
+            let previousPhase = threads[index].phase
+            let previousUpdatedAt = threads[index].updatedAt
+            let previousPendingInteraction = threads[index].primaryPendingInteraction
             let previousPendingApproval = isRebindingRawThread ? nil : threads[index].pendingApproval
             threads[index].preview = thread.preview
             threads[index].name = thread.name
@@ -1339,11 +1342,33 @@ final class RemoteSessionMonitor: ObservableObject {
             }
 
             updateDerivedFields(at: index)
-            threads[index].phase = phase(
+            let nextPhase = phase(
                 from: thread.status,
                 pendingApproval: previousPendingApproval ?? threads[index].pendingApproval,
                 activeTurnId: threads[index].activeTurnId
             )
+            if shouldPreserveVisiblePhase(
+                currentPhase: previousPhase,
+                currentUpdatedAt: previousUpdatedAt,
+                currentPendingInteraction: previousPendingInteraction,
+                incomingPhase: nextPhase,
+                thread: thread,
+                isRebindingRawThread: isRebindingRawThread
+            ) {
+                threads[index].phase = previousPhase
+                Task {
+                    await self.logMonitorEvent(
+                        level: .debug,
+                        hostId: hostId,
+                        method: "thread/list",
+                        threadId: thread.id,
+                        message: "Preserved richer remote phase over weak raw snapshot",
+                        payload: "currentPhase=\(previousPhase.description) incomingPhase=\(nextPhase.description) status=\(thread.status) updatedAt=\(thread.updatedAt)"
+                    )
+                }
+            } else {
+                threads[index].phase = nextPhase
+            }
             scheduleTranscriptFallbackSync(hostId: hostId, thread: thread)
             return
         }
@@ -1380,6 +1405,31 @@ final class RemoteSessionMonitor: ObservableObject {
             updateDerivedFields(at: index)
         }
         scheduleTranscriptFallbackSync(hostId: hostId, thread: thread)
+    }
+
+    private func shouldPreserveVisiblePhase(
+        currentPhase: SessionPhase,
+        currentUpdatedAt: Date,
+        currentPendingInteraction: PendingInteraction?,
+        incomingPhase: SessionPhase,
+        thread: RemoteAppServerThread,
+        isRebindingRawThread: Bool
+    ) -> Bool {
+        guard !isRebindingRawThread else { return false }
+        guard incomingPhase == .idle else { return false }
+        guard thread.turns.isEmpty else { return false }
+
+        let currentNeedsProtection =
+            currentPhase.isActive ||
+            currentPhase.isWaitingForApproval ||
+            currentPhase == .waitingForInput ||
+            currentPendingInteraction != nil
+        guard currentNeedsProtection else { return false }
+
+        // app-server may briefly replay an outdated idle/notLoaded snapshot right after attach.
+        // Keep the richer state for a short settling window so transcript fallback and live events
+        // can converge without flickering the UI between idle and active.
+        return Date().timeIntervalSince(currentUpdatedAt) < 2
     }
 
     private func scheduleTranscriptFallbackSync(hostId: String, thread: RemoteAppServerThread) {
