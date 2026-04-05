@@ -540,6 +540,72 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.threads.first?.logicalSessionId, "remote|ssh-target|/repo")
     }
 
+    func testThreadListPrefersProcessingThreadOverNewerIdleThreadForSameCwd() {
+        let logger = TestDiagnosticsLogger()
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "/repo", isEnabled: true)
+        let activeThread = RemoteAppServerThread(
+            id: "thread-active",
+            preview: "Active",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 1_700_000_000,
+            updatedAt: 1_700_000_100,
+            status: .active(activeFlags: []),
+            path: nil,
+            cwd: "/repo",
+            cliVersion: "1.0.0",
+            name: nil,
+            turns: [
+                makeTurn(
+                    id: "turn-1",
+                    items: [
+                        .commandExecution(
+                            id: "cmd-1",
+                            command: "npm run dev",
+                            cwd: "/repo",
+                            status: .inProgress,
+                            aggregatedOutput: nil
+                        )
+                    ],
+                    status: .inProgress
+                )
+            ]
+        )
+        let newerIdleThread = RemoteAppServerThread(
+            id: "thread-idle",
+            preview: "Idle",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 1_700_000_200,
+            updatedAt: 1_700_000_300,
+            status: .idle,
+            path: nil,
+            cwd: "/repo",
+            cliVersion: "1.0.0",
+            name: nil,
+            turns: []
+        )
+
+        let monitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: logger,
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(monitor)
+
+        monitor.apply(event: .threadList(hostId: host.id, threads: [activeThread, newerIdleThread]))
+
+        XCTAssertEqual(monitor.threads.count, 1)
+        XCTAssertEqual(monitor.threads.first?.threadId, "thread-active")
+        XCTAssertEqual(monitor.threads.first?.phase, .processing)
+    }
+
     func testThreadListFiltersThreadsToConfiguredDefaultCwd() {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()

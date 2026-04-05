@@ -311,11 +311,33 @@ final class RemoteSessionMonitor: ObservableObject {
 
     private func latestThread(from candidates: [RemoteAppServerThread]) -> RemoteAppServerThread? {
         candidates.max(by: { lhs, rhs in
+            let lhsPriority = visibleThreadPriority(for: lhs)
+            let rhsPriority = visibleThreadPriority(for: rhs)
+            if lhsPriority != rhsPriority {
+                return lhsPriority < rhsPriority
+            }
             if lhs.updatedAt != rhs.updatedAt {
                 return lhs.updatedAt < rhs.updatedAt
             }
             return lhs.createdAt < rhs.createdAt
         })
+    }
+
+    private func visibleThreadPriority(for thread: RemoteAppServerThread) -> Int {
+        let currentPhase = phase(
+            from: thread.status,
+            pendingApproval: nil,
+            activeTurnId: activeTurn(from: thread.turns)?.id
+        )
+
+        switch currentPhase {
+        case .waitingForApproval, .processing, .compacting:
+            return 2
+        case .waitingForInput:
+            return 1
+        case .idle, .ended:
+            return 0
+        }
     }
 
     private func retainedPreferredThreads(
