@@ -2,6 +2,7 @@ import XCTest
 @testable import Codex_Island
 
 final class PendingInteractionTests: XCTestCase {
+    // 这里主要覆盖本地 transcript、local app-server thread 与 UI pending interaction 展示之间的优先级和回退规则。
     override func setUp() async throws {
         try await super.setUp()
         await resetSessionStore()
@@ -20,6 +21,7 @@ final class PendingInteractionTests: XCTestCase {
         try await super.tearDown()
     }
 
+    // 先固定纯展示规则：能 inline、只能只读、以及完全退回终端三种 presentation mode。
     func testPresentationModeUsesInlineWhenQuestionsCanBeAnsweredInline() {
         let interaction = makeInteraction(questions: [
             PendingInteractionQuestion(
@@ -255,6 +257,7 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertEqual(approvalResult, .initializing)
     }
 
+    // 如果本地还没绑上 app-server thread，transcript 里的 pending interaction 也必须能展示和回退。
     @MainActor
     func testLocalHookSessionStaysIdleUntilAppServerThreadBinds() async throws {
         let connection = FakeRemoteConnection()
@@ -526,6 +529,7 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertEqual(capturedText, "Yes, implement this plan")
     }
 
+    // 本地发送链路现在优先走 app-server；这些测试锁住 visible thread、hidden raw thread 和错误语义。
     @MainActor
     func testLocalSendMessageUsesAppServerThreadWhenAvailable() async throws {
         let connection = FakeRemoteConnection()
@@ -921,6 +925,7 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertEqual(modes.last?.reasoningEffort, .high)
     }
 
+    // 即使只有 app-server 可见线程，也要合成为 synthetic local session，并进入统一历史/归档流程。
     @MainActor
     func testLocalSessionSummaryPrefersAppServerHistory() async throws {
         let connection = FakeRemoteConnection()
@@ -1397,6 +1402,7 @@ final class PendingInteractionTests: XCTestCase {
         XCTAssertTrue(sessionMonitor.instances.contains(where: { $0.sessionId == "resume-local-thread" }))
     }
 
+    // 用最小问题集构造 codexLocal 交互，避免每个 presentation mode 用例都重复手写 transport 细节。
     private func makeInteraction(questions: [PendingInteractionQuestion]) -> PendingUserInputInteraction {
         PendingUserInputInteraction(
             id: "call-1",
@@ -1406,6 +1412,7 @@ final class PendingInteractionTests: XCTestCase {
         )
     }
 
+    // 统一最小 SessionStart hook payload，供 transcript / local app-server 绑定类测试复用。
     private func makeHookEvent(
         sessionId: String,
         transcriptPath: String? = nil,
@@ -1433,6 +1440,7 @@ final class PendingInteractionTests: XCTestCase {
         )
     }
 
+    // SessionStore 是跨测试共享 actor；每个用例前后都清理，避免 logical session 串台。
     private func resetSessionStore() async {
         let sessions = await SessionStore.shared.allSessions()
         for session in sessions {
@@ -1441,6 +1449,7 @@ final class PendingInteractionTests: XCTestCase {
     }
 }
 
+// 简单 actor 盒子，用来在 async handler 里记录观察值而不引入数据竞争。
 actor LockedBox<Value: Sendable> {
     private var value: Value
 
