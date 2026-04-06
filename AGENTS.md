@@ -30,6 +30,20 @@ xcodebuild test -scheme CodexIsland -destination 'platform=macOS'
 ## 提交与 Pull Request 要求
 提交信息沿用现有仓库风格，使用简短、明确的祈使句，例如 `Reorganize settings menu items`。一次提交只解决一个问题。PR 需要说明用户可见影响，关联 issue；若改动 notch、菜单或窗口表现，附截图或短录屏。涉及 Sparkle、签名、hooks、版本号的改动要单独说明风险和发布影响。
 
+代理在每次 `git commit` 之前，必须先运行与本次改动相匹配的质量门禁，确认结果通过后才能提交。默认应优先执行“只覆盖本次改动相关代码”的门禁，而不是每次都对全仓库做一次完整扫描，避免不必要的性能浪费。
+
+当前仓库的默认提交前门禁如下：
+
+```bash
+./scripts/swift-quality.sh --staged
+```
+
+如果本次改动涉及构建行为、共享基础模块、跨文件接口、发布脚本、hooks、远端链路或其他高风险区域，代理还需要在 `--staged` 基础上补充对应的定向验证，例如相关测试、定向 `xcodebuild test` 或一次 Debug build；只有在需要确认仓库整体基线时，才运行：
+
+```bash
+./scripts/swift-quality.sh --all
+```
+
 代理在完成一个独立功能改动后，默认需要执行一次构建验证，优先使用：
 
 ```bash
