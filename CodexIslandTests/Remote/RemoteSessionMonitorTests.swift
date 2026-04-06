@@ -1,6 +1,8 @@
 import XCTest
 @testable import Codex_Island
 
+private typealias RemoteMonitorEventEmitter = @Sendable (RemoteConnectionEvent) async -> Void
+
 @MainActor
 final class RemoteSessionMonitorTests: XCTestCase {
     // 这里锁住远端监控器的核心状态机：host 更新、optimistic send、thread 选择、事件应用和 transcript fallback。
@@ -104,145 +106,89 @@ final class RemoteSessionMonitorTests: XCTestCase {
     }
 
     func testStartThreadRecoversNewThreadAfterTimeout() async throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let recoveredThread = makeThread(id: "thread-new", preview: "Recovered")
 
-        connection.startThreadHandler = { _ in
+        harness.connection.startThreadHandler = { _ in
             throw RemoteSessionError.timeout("Timed out waiting for app-server response to thread/start")
         }
-        connection.refreshThreadsHandler = {
-            await connection.emit?(.threadUpsert(hostId: host.id, thread: recoveredThread))
+        harness.connection.refreshThreadsHandler = {
+            await harness.connection.emit?(.threadUpsert(hostId: harness.host.id, thread: recoveredThread))
         }
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
-
-        monitor.startMonitoring()
-        let recovered = try await monitor.startThread(hostId: host.id)
+        harness.start()
+        let recovered = try await harness.monitor.startThread(hostId: harness.host.id)
 
         XCTAssertEqual(recovered.threadId, "thread-new")
-        XCTAssertNil(monitor.hostActionErrors[host.id])
+        XCTAssertNil(harness.monitor.hostActionErrors[harness.host.id])
     }
 
     // start/send timeout 会走 optimistic 路径；这些回归确保临时 user item 能补上、合并或回滚。
     func testSendMessageAddsOptimisticUserItemOnTimeout() async throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let baseThread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
 
-        connection.startThreadHandler = { _ in makeThreadStartResponse(thread: baseThread) }
-        connection.sendMessageHandler = { _, _, _, _ in
+        harness.connection.startThreadHandler = { _ in makeThreadStartResponse(thread: baseThread) }
+        harness.connection.sendMessageHandler = { _, _, _, _ in
             throw RemoteSessionError.timeout("Timed out waiting for app-server response to turn/start")
         }
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
+        harness.start()
+        harness.upsert(baseThread)
+        let thread = try XCTUnwrap(harness.monitor.threads.first)
 
-        monitor.startMonitoring()
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: baseThread))
-        let thread = try XCTUnwrap(monitor.threads.first)
+        try await harness.monitor.sendMessage(thread: thread, text: "hi")
 
-        try await monitor.sendMessage(thread: thread, text: "hi")
-
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertEqual(updated.history.last?.type, .user("hi"))
         XCTAssertEqual(updated.phase, .processing)
     }
 
     func testSendMessageMergesOptimisticUserItemWhenServerUserMessageArrives() async throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let baseThread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
 
-        connection.startThreadHandler = { _ in makeThreadStartResponse(thread: baseThread) }
-        connection.sendMessageHandler = { _, _, _, _ in }
+        harness.connection.startThreadHandler = { _ in makeThreadStartResponse(thread: baseThread) }
+        harness.connection.sendMessageHandler = { _, _, _, _ in }
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
+        harness.start()
+        harness.upsert(baseThread)
+        let thread = try XCTUnwrap(harness.monitor.threads.first)
 
-        monitor.startMonitoring()
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: baseThread))
-        let thread = try XCTUnwrap(monitor.threads.first)
-
-        try await monitor.sendMessage(thread: thread, text: "hi")
-        monitor.apply(event: .itemStarted(
-            hostId: host.id,
+        try await harness.monitor.sendMessage(thread: thread, text: "hi")
+        harness.monitor.apply(event: .itemStarted(
+            hostId: harness.host.id,
             threadId: "thread-1",
             turnId: "turn-1",
             item: .userMessage(id: "server-user-1", content: [.text("hi")])
         ))
 
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertEqual(updated.history.count, 1)
         XCTAssertEqual(updated.history.first?.id, "server-user-1")
         XCTAssertEqual(updated.history.first?.type, .user("hi"))
     }
 
     func testSendMessageRemovesOptimisticUserItemOnFailure() async throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let baseThread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
 
-        connection.sendMessageHandler = { _, _, _, _ in
+        harness.connection.sendMessageHandler = { _, _, _, _ in
             throw RemoteSessionError.transport("boom")
         }
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
-
-        monitor.startMonitoring()
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: baseThread))
-        let thread = try XCTUnwrap(monitor.threads.first)
+        harness.start()
+        harness.upsert(baseThread)
+        let thread = try XCTUnwrap(harness.monitor.threads.first)
 
         do {
-            try await monitor.sendMessage(thread: thread, text: "hi")
+            try await harness.monitor.sendMessage(thread: thread, text: "hi")
             XCTFail("Expected sendMessage to fail")
         } catch {
             XCTAssertEqual(error.localizedDescription, "boom")
         }
 
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertTrue(updated.history.isEmpty)
     }
 
@@ -287,26 +233,12 @@ final class RemoteSessionMonitorTests: XCTestCase {
 
     // 事件应用层不仅维护 phase，也负责把 plan、token usage、approval 和 user input 翻译成可见状态。
     func testTurnPlanUpdatedAddsTodoWriteHistoryItem() throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
-
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
-        monitor.apply(event: .turnPlanUpdated(
-            hostId: host.id,
+        harness.upsert(thread)
+        harness.monitor.apply(event: .turnPlanUpdated(
+            hostId: harness.host.id,
             threadId: "thread-1",
             turnId: "turn-1",
             explanation: "Syncing plan",
@@ -316,7 +248,7 @@ final class RemoteSessionMonitorTests: XCTestCase {
             ]
         ))
 
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         guard case .toolCall(let tool)? = updated.history.last?.type else {
             return XCTFail("Expected plan update tool call")
         }
@@ -336,26 +268,12 @@ final class RemoteSessionMonitorTests: XCTestCase {
     }
 
     func testTokenUsageUpdateSetsContextRemainingPercent() throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
-
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
-        monitor.apply(event: .tokenUsageUpdated(
-            hostId: host.id,
+        harness.upsert(thread)
+        harness.monitor.apply(event: .tokenUsageUpdated(
+            hostId: harness.host.id,
             threadId: "thread-1",
             turnId: "turn-1",
             tokenUsage: SessionTokenUsageInfo(
@@ -377,15 +295,13 @@ final class RemoteSessionMonitorTests: XCTestCase {
             )
         ))
 
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertEqual(updated.contextRemainingPercent, 91)
         XCTAssertEqual(updated.tokenUsage?.totalTokenUsage.totalTokens, 123_000)
     }
 
     func testApprovalEventSetsPendingApprovalState() throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
         let approval = RemotePendingApproval(
             id: "approval-1",
@@ -400,31 +316,17 @@ final class RemoteSessionMonitorTests: XCTestCase {
             availableActions: [.allow, .cancel]
         )
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
+        harness.upsert(thread)
+        harness.monitor.apply(event: .approval(hostId: harness.host.id, threadId: "thread-1", approval: approval))
 
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
-        monitor.apply(event: .approval(hostId: host.id, threadId: "thread-1", approval: approval))
-
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertEqual(updated.pendingApproval?.id, "approval-1")
         XCTAssertEqual(updated.phase.approvalToolName, "Command Execution")
         XCTAssertEqual(updated.pendingToolInput, "pwd")
     }
 
     func testUserInputRequestSetsPendingInteractionState() throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
         let interaction = PendingUserInputInteraction(
             id: "item-1",
@@ -442,31 +344,17 @@ final class RemoteSessionMonitorTests: XCTestCase {
             transport: .remoteAppServer(requestId: .int(7))
         )
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
+        harness.upsert(thread)
+        harness.monitor.apply(event: .userInputRequest(hostId: harness.host.id, threadId: "thread-1", interaction: interaction))
 
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
-        monitor.apply(event: .userInputRequest(hostId: host.id, threadId: "thread-1", interaction: interaction))
-
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertEqual(updated.pendingInteractions.count, 1)
         XCTAssertEqual(updated.primaryPendingInteraction?.id, "item-1")
         XCTAssertTrue(updated.needsAttention)
     }
 
     func testServerRequestResolvedClearsPendingInteractionState() throws {
-        let logger = TestDiagnosticsLogger()
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(id: "host-1", name: "Remote", sshTarget: "ssh-target", defaultCwd: "", isEnabled: true)
+        let harness = makeRemoteMonitorHarness()
         let thread = makeThread(id: "thread-1", preview: "Preview", status: .idle)
         let interaction = PendingUserInputInteraction(
             id: "item-1",
@@ -484,23 +372,11 @@ final class RemoteSessionMonitorTests: XCTestCase {
             transport: .remoteAppServer(requestId: .int(7))
         )
 
-        let monitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: logger,
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(monitor)
+        harness.upsert(thread)
+        harness.monitor.apply(event: .userInputRequest(hostId: harness.host.id, threadId: "thread-1", interaction: interaction))
+        harness.monitor.apply(event: .serverRequestResolved(hostId: harness.host.id, threadId: "thread-1", requestId: .int(7)))
 
-        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
-        monitor.apply(event: .userInputRequest(hostId: host.id, threadId: "thread-1", interaction: interaction))
-        monitor.apply(event: .serverRequestResolved(hostId: host.id, threadId: "thread-1", requestId: .int(7)))
-
-        let updated = try XCTUnwrap(monitor.threads.first)
+        let updated = try XCTUnwrap(harness.monitor.threads.first)
         XCTAssertTrue(updated.pendingInteractions.isEmpty)
     }
 
@@ -1385,4 +1261,64 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertEqual(callbackThread.threadId, "thread-new")
         XCTAssertFalse(tracker.didResume)
     }
+}
+
+@MainActor
+private struct RemoteMonitorHarness {
+    let logger: TestDiagnosticsLogger
+    let host: RemoteHostConfig
+    let connection: FakeRemoteConnection
+    let monitor: RemoteSessionMonitor
+
+    func start() {
+        monitor.startMonitoring()
+    }
+
+    func applyConnected() {
+        monitor.apply(event: .connectionState(hostId: host.id, state: .connected))
+    }
+
+    func applyFailed(_ message: String) {
+        monitor.apply(event: .connectionState(hostId: host.id, state: .failed(message)))
+    }
+
+    func upsert(_ thread: RemoteAppServerThread) {
+        monitor.apply(event: .threadUpsert(hostId: host.id, thread: thread))
+    }
+
+    func list(_ threads: [RemoteAppServerThread]) {
+        monitor.apply(event: .threadList(hostId: host.id, threads: threads))
+    }
+}
+
+@MainActor
+private func makeRemoteMonitorHarness(
+    host: RemoteHostConfig = RemoteHostConfig(
+        id: "host-1",
+        name: "Remote",
+        sshTarget: "ssh-target",
+        defaultCwd: "",
+        isEnabled: true
+    ),
+    connection: FakeRemoteConnection = FakeRemoteConnection(),
+    connectionFactoryOverride: ((RemoteHostConfig, @escaping RemoteMonitorEventEmitter) -> any RemoteAppServerConnectionProtocol)? = nil
+) -> RemoteMonitorHarness {
+    let logger = TestDiagnosticsLogger()
+    let monitor = RemoteSessionMonitor(
+        initialHosts: [host],
+        loadHosts: { [host] in [host] },
+        saveHosts: { _ in },
+        diagnosticsLogger: logger,
+        connectionFactory: connectionFactoryOverride ?? { _, emit in
+            connection.emit = emit
+            return connection
+        }
+    )
+    TestObjectRetainer.retain(monitor)
+    return RemoteMonitorHarness(
+        logger: logger,
+        host: host,
+        connection: connection,
+        monitor: monitor
+    )
 }
