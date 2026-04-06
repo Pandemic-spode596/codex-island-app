@@ -65,39 +65,18 @@ final class PendingInteractionTests: XCTestCase {
 
     @MainActor
     func testLocalAppServerPendingInteractionOverridesTranscriptInteraction() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(id: "session-1", status: .idle)
         ))
-        localMonitor.apply(event: .userInputRequest(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .userInputRequest(
+            hostId: harness.host.id,
             threadId: "session-1",
             interaction: PendingUserInputInteraction(
                 id: "remote-request",
@@ -117,54 +96,33 @@ final class PendingInteractionTests: XCTestCase {
         ))
         await Task.yield()
 
-        let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
-        XCTAssertEqual(sessionMonitor.pendingInteraction(for: session)?.id, "remote-request")
+        let session = try XCTUnwrap(harness.sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
+        XCTAssertEqual(harness.sessionMonitor.pendingInteraction(for: session)?.id, "remote-request")
         XCTAssertEqual(session.pendingInteractions.first?.id, "remote-request")
         XCTAssertTrue(session.needsAttention)
     }
 
     @MainActor
     func testLocalApprovalResponseReturnsFailureWhenAppServerRespondFails() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        connection.respondActionHandler = { _, _ in
+        harness.connection.respondActionHandler = { _, _ in
             throw RemoteSessionError.transport("approval response failed")
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(
                 id: "session-1",
                 status: .active(activeFlags: [.waitingOnUserInput])
             )
         ))
-        localMonitor.apply(event: .approval(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .approval(
+            hostId: harness.host.id,
             threadId: "session-1",
             approval: RemotePendingApproval(
                 id: "approval-1",
@@ -181,44 +139,23 @@ final class PendingInteractionTests: XCTestCase {
         ))
         await Task.yield()
 
-        let result = await sessionMonitor.respond(sessionId: "session-1", action: .allow)
+        let result = await harness.sessionMonitor.respond(sessionId: "session-1", action: .allow)
 
         XCTAssertEqual(result, .failed("approval response failed"))
     }
 
     @MainActor
     func testLocalApprovalResponseReturnsInitializingWhileThreadLoadPending() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        connection.refreshThreadsHandler = {
+        harness.connection.refreshThreadsHandler = {
             try await Task.sleep(for: .milliseconds(400))
         }
-        connection.resumeThreadHandler = { threadId, _ in
+        harness.connection.resumeThreadHandler = { threadId, _ in
             makeThreadResumeResponse(thread: makeThread(id: threadId, preview: "Recovered", cwd: "/tmp/project"))
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(
             sessionId: "session-1",
             transcriptPath: "/Users/test/.codex/sessions/2026/04/03/rollout-2026-04-03T14-40-04-session-1.jsonl",
@@ -249,9 +186,9 @@ final class PendingInteractionTests: XCTestCase {
         )))
         await Task.yield()
 
-        async let firstAttempt = sessionMonitor.sendMessageResult(sessionId: "session-1", text: "prime load")
+        async let firstAttempt = harness.sessionMonitor.sendMessageResult(sessionId: "session-1", text: "prime load")
         try? await Task.sleep(for: .milliseconds(50))
-        let approvalResult = await sessionMonitor.respond(sessionId: "session-1", action: .allow)
+        let approvalResult = await harness.sessionMonitor.respond(sessionId: "session-1", action: .allow)
         _ = await firstAttempt
 
         XCTAssertEqual(approvalResult, .initializing)
@@ -260,65 +197,23 @@ final class PendingInteractionTests: XCTestCase {
     // 如果本地还没绑上 app-server thread，transcript 里的 pending interaction 也必须能展示和回退。
     @MainActor
     func testLocalHookSessionStaysIdleUntilAppServerThreadBinds() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
+        let session = try XCTUnwrap(harness.sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
         XCTAssertEqual(session.phase, .idle)
-        XCTAssertNil(sessionMonitor.pendingInteraction(for: session))
-        XCTAssertFalse(sessionMonitor.canSendMessage(to: session))
+        XCTAssertNil(harness.sessionMonitor.pendingInteraction(for: session))
+        XCTAssertFalse(harness.sessionMonitor.canSendMessage(to: session))
     }
 
     @MainActor
     func testLocalTranscriptPendingInteractionIsShownWithoutAppServerThread() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
@@ -354,50 +249,29 @@ final class PendingInteractionTests: XCTestCase {
         )))
         await Task.yield()
 
-        let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
+        let session = try XCTUnwrap(harness.sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
         XCTAssertEqual(session.phase, .idle)
         XCTAssertEqual(session.pendingInteractions.first?.id, "local-transcript-request")
-        XCTAssertEqual(sessionMonitor.pendingInteraction(for: session)?.id, "local-transcript-request")
-        XCTAssertFalse(sessionMonitor.canSendMessage(to: session))
+        XCTAssertEqual(harness.sessionMonitor.pendingInteraction(for: session)?.id, "local-transcript-request")
+        XCTAssertFalse(harness.sessionMonitor.canSendMessage(to: session))
         XCTAssertFalse(
-            sessionMonitor.canRespondInline(
+            harness.sessionMonitor.canRespondInline(
                 to: session,
-                interaction: try XCTUnwrap(sessionMonitor.pendingInteraction(for: session))
+                interaction: try XCTUnwrap(harness.sessionMonitor.pendingInteraction(for: session))
             )
         )
     }
 
     @MainActor
     func testLocalTranscriptPendingInteractionUsesInlineFallbackWhenAppServerThreadHasNoInteraction() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(id: "session-1", status: .idle)
         ))
         await SessionStore.shared.process(.fileUpdated(FileUpdatePayload(
@@ -432,53 +306,32 @@ final class PendingInteractionTests: XCTestCase {
         )))
         await Task.yield()
 
-        let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
+        let session = try XCTUnwrap(harness.sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
         XCTAssertEqual(session.pendingInteractions.first?.id, "local-transcript-request")
-        XCTAssertEqual(sessionMonitor.pendingInteraction(for: session)?.id, "local-transcript-request")
+        XCTAssertEqual(harness.sessionMonitor.pendingInteraction(for: session)?.id, "local-transcript-request")
         XCTAssertTrue(
-            sessionMonitor.canRespondInline(
+            harness.sessionMonitor.canRespondInline(
                 to: session,
-                interaction: try XCTUnwrap(sessionMonitor.pendingInteraction(for: session))
+                interaction: try XCTUnwrap(harness.sessionMonitor.pendingInteraction(for: session))
             )
         )
     }
 
     @MainActor
     func testLocalTranscriptPendingInteractionCanRespondInlineViaAppServerThread() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
-
         let sentText = LockedBox<String?>(nil)
-        connection.sendMessageHandler = { _, text, _, _ in
+        let harness = makeLocalAppServerHarness()
+
+        harness.connection.sendMessageHandler = { _, text, _, _ in
             await sentText.set(text)
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(id: "session-1", status: .idle)
         ))
         await SessionStore.shared.process(.fileUpdated(FileUpdatePayload(
@@ -513,11 +366,11 @@ final class PendingInteractionTests: XCTestCase {
         )))
         await Task.yield()
 
-        let session = try XCTUnwrap(sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
-        let interaction = try XCTUnwrap(sessionMonitor.pendingInteraction(for: session))
-        XCTAssertTrue(sessionMonitor.canRespondInline(to: session, interaction: interaction))
+        let session = try XCTUnwrap(harness.sessionMonitor.instances.first(where: { $0.sessionId == "session-1" }))
+        let interaction = try XCTUnwrap(harness.sessionMonitor.pendingInteraction(for: session))
+        XCTAssertTrue(harness.sessionMonitor.canRespondInline(to: session, interaction: interaction))
 
-        let success = await sessionMonitor.respond(
+        let success = await harness.sessionMonitor.respond(
             sessionId: session.sessionId,
             answers: PendingInteractionAnswerPayload(
                 answers: ["next_step": ["Yes, implement this plan (Recommended)"]]
@@ -638,43 +491,22 @@ final class PendingInteractionTests: XCTestCase {
 
     @MainActor
     func testLocalSendMessageResultReturnsInitializingWhenThreadLoadAlreadyPending() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        connection.refreshThreadsHandler = {
+        harness.connection.refreshThreadsHandler = {
             try await Task.sleep(for: .milliseconds(400))
         }
-        connection.resumeThreadHandler = { threadId, _ in
+        harness.connection.resumeThreadHandler = { threadId, _ in
             makeThreadResumeResponse(thread: makeThread(id: threadId, preview: "Recovered", cwd: "/tmp"))
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        async let firstAttempt = sessionMonitor.sendMessageResult(sessionId: "session-1", text: "first")
+        async let firstAttempt = harness.sessionMonitor.sendMessageResult(sessionId: "session-1", text: "first")
         try? await Task.sleep(for: .milliseconds(50))
-        let secondAttempt = await sessionMonitor.sendMessageResult(sessionId: "session-1", text: "second")
+        let secondAttempt = await harness.sessionMonitor.sendMessageResult(sessionId: "session-1", text: "second")
         _ = await firstAttempt
 
         XCTAssertEqual(secondAttempt, .initializing)
@@ -682,69 +514,29 @@ final class PendingInteractionTests: XCTestCase {
 
     @MainActor
     func testLocalSendMessageResultReturnsUnderlyingThreadLoadFailure() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        connection.refreshThreadsHandler = {
+        harness.connection.refreshThreadsHandler = {
             throw RemoteSessionError.transport("app-server handshake failed")
         }
-        connection.resumeThreadHandler = { _, _ in
+        harness.connection.resumeThreadHandler = { _, _ in
             throw RemoteSessionError.transport("thread resume failed")
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        let result = await sessionMonitor.sendMessageResult(sessionId: "session-1", text: "hello")
+        let result = await harness.sessionMonitor.sendMessageResult(sessionId: "session-1", text: "hello")
 
         XCTAssertEqual(result, .failed("app-server handshake failed"))
     }
 
     @MainActor
     func testLocalListModelsUsesAppServerConnection() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
-
+        let harness = makeLocalAppServerHarness()
         let includeHiddenFlag = LockedBox<Bool?>(nil)
-        connection.listModelsHandler = { includeHidden in
+        harness.connection.listModelsHandler = { includeHidden in
             await includeHiddenFlag.set(includeHidden)
             return [
                 RemoteAppServerModel(
@@ -765,20 +557,17 @@ final class PendingInteractionTests: XCTestCase {
             ]
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(id: "session-1", status: .idle)
         ))
         await Task.yield()
 
-        let models = try await sessionMonitor.listLocalModels(sessionId: "session-1", includeHidden: true)
+        let models = try await harness.sessionMonitor.listLocalModels(sessionId: "session-1", includeHidden: true)
         let capturedIncludeHidden = await includeHiddenFlag.get()
 
         XCTAssertEqual(capturedIncludeHidden, true)
@@ -788,28 +577,9 @@ final class PendingInteractionTests: XCTestCase {
 
     @MainActor
     func testLocalSetTurnContextUsesAppServerThread() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
-
+        let harness = makeLocalAppServerHarness()
         let capturedContext = LockedBox<RemoteThreadTurnContext?>(nil)
-        connection.resumeThreadHandler = { threadId, turnContext in
+        harness.connection.resumeThreadHandler = { threadId, turnContext in
             XCTAssertEqual(threadId, "session-1")
             await capturedContext.set(turnContext)
             return await makeThreadResumeResponse(
@@ -822,15 +592,12 @@ final class PendingInteractionTests: XCTestCase {
             )
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(id: "session-1", status: .idle)
         ))
         await Task.yield()
@@ -852,7 +619,7 @@ final class PendingInteractionTests: XCTestCase {
             )
         )
 
-        let updatedThread = try await sessionMonitor.setLocalTurnContext(
+        let updatedThread = try await harness.sessionMonitor.setLocalTurnContext(
             sessionId: "session-1",
             turnContext: desiredContext,
             synchronizeThread: true
@@ -868,27 +635,9 @@ final class PendingInteractionTests: XCTestCase {
 
     @MainActor
     func testLocalListCollaborationModesUsesAppServerConnection() async throws {
-        let connection = FakeRemoteConnection()
-        let host = RemoteHostConfig(
-            id: "local-app-server",
-            name: "Local App Server",
-            sshTarget: "local-app-server",
-            defaultCwd: "",
-            isEnabled: true
-        )
-        let localMonitor = RemoteSessionMonitor(
-            initialHosts: [host],
-            loadHosts: { [host] in [host] },
-            saveHosts: { _ in },
-            diagnosticsLogger: TestDiagnosticsLogger(),
-            connectionFactory: { _, emit in
-                connection.emit = emit
-                return connection
-            }
-        )
-        TestObjectRetainer.retain(localMonitor)
+        let harness = makeLocalAppServerHarness()
 
-        connection.listCollaborationModesHandler = {
+        harness.connection.listCollaborationModesHandler = {
             [
                 RemoteAppServerCollaborationModeMask(
                     name: "Default",
@@ -905,20 +654,17 @@ final class PendingInteractionTests: XCTestCase {
             ]
         }
 
-        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
-        TestObjectRetainer.retain(sessionMonitor)
-
-        localMonitor.startMonitoring()
+        harness.localMonitor.startMonitoring()
         await SessionStore.shared.process(.hookReceived(makeHookEvent(sessionId: "session-1")))
         await Task.yield()
 
-        localMonitor.apply(event: .threadUpsert(
-            hostId: host.id,
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
             thread: makeThread(id: "session-1", status: .idle)
         ))
         await Task.yield()
 
-        let modes = try await sessionMonitor.listLocalCollaborationModes(sessionId: "session-1")
+        let modes = try await harness.sessionMonitor.listLocalCollaborationModes(sessionId: "session-1")
 
         XCTAssertEqual(modes.count, 2)
         XCTAssertEqual(modes.last?.mode, .plan)
@@ -1412,6 +1158,39 @@ final class PendingInteractionTests: XCTestCase {
         )
     }
 
+    @MainActor
+    private func makeLocalAppServerHarness() -> LocalAppServerHarness {
+        let connection = FakeRemoteConnection()
+        let host = RemoteHostConfig(
+            id: "local-app-server",
+            name: "Local App Server",
+            sshTarget: "local-app-server",
+            defaultCwd: "",
+            isEnabled: true
+        )
+        let localMonitor = RemoteSessionMonitor(
+            initialHosts: [host],
+            loadHosts: { [host] in [host] },
+            saveHosts: { _ in },
+            diagnosticsLogger: TestDiagnosticsLogger(),
+            connectionFactory: { _, emit in
+                connection.emit = emit
+                return connection
+            }
+        )
+        TestObjectRetainer.retain(localMonitor)
+
+        let sessionMonitor = CodexSessionMonitor(localAppServerMonitor: localMonitor)
+        TestObjectRetainer.retain(sessionMonitor)
+
+        return LocalAppServerHarness(
+            connection: connection,
+            host: host,
+            localMonitor: localMonitor,
+            sessionMonitor: sessionMonitor
+        )
+    }
+
     // 统一最小 SessionStart hook payload，供 transcript / local app-server 绑定类测试复用。
     private func makeHookEvent(
         sessionId: String,
@@ -1464,4 +1243,12 @@ actor LockedBox<Value: Sendable> {
     func get() -> Value {
         value
     }
+}
+
+@MainActor
+private struct LocalAppServerHarness {
+    let connection: FakeRemoteConnection
+    let host: RemoteHostConfig
+    let localMonitor: RemoteSessionMonitor
+    let sessionMonitor: CodexSessionMonitor
 }
