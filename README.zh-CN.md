@@ -142,8 +142,13 @@ ssh -T -o BatchMode=yes <target> codex app-server --listen stdio://
 日常开发直接用 Xcode 即可。仓库也带了完整的发布辅助脚本，可用于签名、公证、生成 DMG、生成 appcast，以及可选地发布 GitHub Release：
 
 ```bash
+brew install swiftformat swiftlint
+./scripts/swift-quality.sh
+./scripts/install-git-hooks.sh
 ./scripts/create-release.sh
 ```
+
+`./scripts/swift-quality.sh` 会在同一轮里同时检查 `CodexIsland/` 和 `CodexIslandTests/`。`./scripts/install-git-hooks.sh` 会把 Git 切到仓库内的 `.githooks/` 包装层，先保留 beads 现有 hooks，再在 `pre-commit` 里追加已暂存 Swift 文件的质量检查，避免历史质量债阻塞无关提交。
 
 如果改动了 `CodexIsland/Services/Hooks/` 或 `CodexIsland/Resources/codex-island-state.py`，要把它视为会直接影响用户本地 Codex 环境的高风险改动，务必手工验证。
 

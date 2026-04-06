@@ -58,6 +58,8 @@ target/
 .[!.]*/
 !.git/
 !.github/
+!.githooks/
+!.githooks/*
 
 # Local workflow state
 .beads/

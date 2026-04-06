@@ -142,8 +142,13 @@ The repository does not claim to collect conversation content in analytics, but 
 Open the project in Xcode for day-to-day work. The repository also includes release automation for signing, notarization, DMG creation, appcast generation, and optional GitHub release publishing:
 
 ```bash
+brew install swiftformat swiftlint
+./scripts/swift-quality.sh
+./scripts/install-git-hooks.sh
 ./scripts/create-release.sh
 ```
+
+`./scripts/swift-quality.sh` lints both `CodexIsland/` and `CodexIslandTests/` in one run. `./scripts/install-git-hooks.sh` switches Git to the repository's `.githooks/` wrappers, keeps existing beads hooks in the chain, and adds a staged-file Swift quality check to `pre-commit` so existing repository-wide debt does not block unrelated commits.
 
 If you change anything under `CodexIsland/Services/Hooks/` or `CodexIsland/Resources/codex-island-state.py`, treat it as user-impacting local environment behavior and verify it carefully.
 

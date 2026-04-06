@@ -1,0 +1,7 @@
+--swiftversion 6
+--indent 4
+--linebreaks lf
+--ifdef indent
+--trimwhitespace always
+--exclude .beads,build,releases,sidecar
+--rules consecutiveBlankLines,indent,linebreakAtEndOfFile,spaceAroundBraces,spaceAroundBrackets,spaceAroundComments,spaceAroundOperators,spaceAroundParens,trailingSpace

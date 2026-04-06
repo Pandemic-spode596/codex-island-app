@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+"$ROOT_DIR/scripts/run-beads-hook.sh" pre-commit "$@"
+exec "$ROOT_DIR/scripts/swift-quality.sh" --staged

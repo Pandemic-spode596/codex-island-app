@@ -1,0 +1,25 @@
+included:
+  - CodexIsland
+  - CodexIslandTests
+
+excluded:
+  - .beads
+  - build
+  - releases
+  - sidecar
+
+reporter: xcode
+
+only_rules:
+  - closure_spacing
+  - colon
+  - comma
+  - control_statement
+  - empty_count
+  - operator_usage_whitespace
+  - opening_brace
+  - return_arrow_whitespace
+  - statement_position
+  - trailing_newline
+  - vertical_whitespace
+  - vertical_whitespace_closing_braces
