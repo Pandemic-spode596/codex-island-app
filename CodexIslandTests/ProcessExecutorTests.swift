@@ -2,6 +2,7 @@ import XCTest
 @testable import Codex_Island
 
 final class ProcessExecutorTests: XCTestCase {
+    // 同时灌满 stdout / stderr，用来卡住“串行 drain 两条 pipe”这类真实死锁回归。
     func testRunWithResultHandlesLargeStdoutAndStderrWithoutDeadlock() async throws {
         let script = """
         import sys
@@ -47,6 +48,7 @@ final class ProcessExecutorTests: XCTestCase {
         return "/usr/bin/python"
     }
 
+    // Result 断言集中在这里，避免每个测试都重复展开 failure 分支。
     private func successValue<T>(from result: Result<T, ProcessExecutorError>) -> T? {
         switch result {
         case .success(let value):

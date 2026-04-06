@@ -1,6 +1,7 @@
 import XCTest
 @testable import Codex_Island
 
+// 测试里的远端链路经常只关心“记录到了什么日志”，这个 logger 保持最小可观察面。
 actor TestDiagnosticsLogger: RemoteDiagnosticsLogging {
     private(set) var records: [RemoteDiagnosticsRecord] = []
 
@@ -9,6 +10,7 @@ actor TestDiagnosticsLogger: RemoteDiagnosticsLogging {
     }
 }
 
+// 轻量 transport double：允许测试按需手动推送 stdout / stderr / termination 事件。
 actor TestTransport: RemoteAppServerTransport {
     private var stdoutHandler: (@Sendable (String) async -> Void)?
     private var stderrHandler: (@Sendable (String) async -> Void)?
@@ -50,6 +52,7 @@ actor TestTransport: RemoteAppServerTransport {
     }
 }
 
+// 多数远端单测只需要 stub 出进程结果，不需要真的启动 ssh / codex 子进程。
 struct TestProcessExecutor: ProcessExecuting {
     var runHandler: @Sendable (String, [String]) async throws -> String = { _, _ in "" }
     var runWithResultHandler: @Sendable (String, [String]) async -> Result<ProcessResult, ProcessExecutorError> = { _, _ in
@@ -72,6 +75,7 @@ struct TestProcessExecutor: ProcessExecuting {
     }
 }
 
+// 统一记录 RemoteAppServerConnection 发出的事件，供测试按连接状态断言。
 actor RemoteEventRecorder {
     private(set) var events: [RemoteConnectionEvent] = []
 
@@ -89,6 +93,7 @@ actor RemoteEventRecorder {
     }
 }
 
+// 某些 monitor 需要在异步用例里额外 retain，避免测试过早释放对象导致假阴性。
 enum TestObjectRetainer {
     private static var retainedObjects: [AnyObject] = []
 
@@ -101,6 +106,7 @@ enum TestObjectRetainer {
     }
 }
 
+// FakeRemoteConnection 让测试按需拼装 thread/start、respond、refresh 等单个能力，不必走完整协议栈。
 final class FakeRemoteConnection: RemoteAppServerConnectionProtocol, @unchecked Sendable {
     var emit: (@Sendable (RemoteConnectionEvent) async -> Void)?
     var startThreadHandler: (@Sendable (String) async throws -> RemoteAppServerThreadStartResponse)?
@@ -207,6 +213,7 @@ final class FakeRemoteConnection: RemoteAppServerConnectionProtocol, @unchecked 
     }
 }
 
+// 统一的线程夹具，避免每个测试都手写一份最小 thread payload。
 func makeThread(
     id: String = "thread-1",
     preview: String = "Preview",
@@ -232,6 +239,7 @@ func makeThread(
     )
 }
 
+// thread/start 响应经常要补一组默认策略字段，这里集中提供稳定夹具。
 func makeThreadStartResponse(
     thread: RemoteAppServerThread,
     model: String = "gpt-5.4",

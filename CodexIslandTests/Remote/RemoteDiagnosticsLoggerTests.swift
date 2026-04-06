@@ -2,6 +2,7 @@ import XCTest
 @testable import Codex_Island
 
 final class RemoteDiagnosticsLoggerTests: XCTestCase {
+    // 这些回归覆盖三个关键语义：写 JSONL、达到阈值滚动、用户关闭开关后完全不落盘。
     func testLoggerWritesJSONLines() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

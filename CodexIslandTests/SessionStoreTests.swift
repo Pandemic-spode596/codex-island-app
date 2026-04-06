@@ -1,6 +1,7 @@
 import XCTest
 @testable import Codex_Island
 
+// SessionStore 是全局 actor；每个测试前后都要清掉遗留 session，避免逻辑槽位互相污染。
 actor SessionStoreTestHelper {
     static let shared = SessionStoreTestHelper()
 
@@ -13,6 +14,7 @@ actor SessionStoreTestHelper {
 }
 
 final class SessionStoreTests: XCTestCase {
+    // 这些回归集中验证 logical session 的归并键选择：优先 tty，再回退 pid / Ghostty surface 元数据。
     override func setUp() async throws {
         try await super.setUp()
         await SessionStoreTestHelper.shared.cleanup()

@@ -2,6 +2,7 @@ import XCTest
 @testable import Codex_Island
 
 final class SSHConfigHostSuggestionProviderTests: XCTestCase {
+    // 候选只接受具体 alias；wildcard 和 Include 解析都要在这里锁住，避免 UI 建议列表误导用户。
     func testLoadSuggestionsReadsConcreteHostsAndIncludeFiles() async throws {
         let tempDirectory = try makeTemporaryDirectory()
         let sshDirectory = tempDirectory.appendingPathComponent(".ssh", isDirectory: true)
@@ -110,6 +111,7 @@ final class SSHConfigHostSuggestionProviderTests: XCTestCase {
         XCTAssertNil(suggestions.first?.resolutionSummary)
     }
 
+    // 每个测试都用独立 ssh 目录，避免 Include / config fixture 串到别的用例。
     private func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)

@@ -4,6 +4,7 @@ import Markdown
 
 @MainActor
 final class ChatHistoryManagerTests: XCTestCase {
+    // 这里区分“显式加载过历史”与“真正拿到 transcript 内容”，避免空 transcript 被误判成已恢复聊天记录。
     override func setUp() async throws {
         try await super.setUp()
         await SessionStoreTestHelper.shared.cleanup()

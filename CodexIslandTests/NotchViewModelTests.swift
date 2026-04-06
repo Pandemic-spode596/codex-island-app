@@ -4,6 +4,7 @@ import XCTest
 
 @MainActor
 final class NotchViewModelTests: XCTestCase {
+    // notch 命中、hover 与 collapsed summary 都是强 UI 行为，优先用细粒度单测锁住几何与状态机规则。
     func testHoverLeaveClosesAfterDelayWhenOpenedByHover() async {
         let viewModel = makeViewModel(hoverCloseDelay: 0.05)
         viewModel.setHovering(true)
