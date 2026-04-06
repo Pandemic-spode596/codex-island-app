@@ -2,6 +2,7 @@ import XCTest
 @testable import Codex_Island
 
 final class CodexConversationParserTests: XCTestCase {
+    // 这里主要锁 transcript parser 的几类高风险输入：runtime info、plan follow-up、扁平/嵌套 event_msg 格式。
     func testRuntimeInfoParsesModelAndTokenUsage() async throws {
         let transcript = """
         {"timestamp":"2026-04-03T01:00:00Z","type":"session_meta","payload":{"model_provider":"openai"}}
@@ -26,6 +27,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(runtimeInfo.tokenUsage?.contextRemainingPercent, 91)
     }
 
+    // 旧格式的 request_user_input 走 response_item.function_call，这里保留多题 plan mode 样例。
     func testPendingUserInputParsesPlanOptions() async throws {
         let transcript = #"""
         {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}}
@@ -51,6 +53,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(interaction.questions[1].options[2].description, "按后续动作来组织选项，而不是按主题。")
     }
 
+    // 新格式会把 follow-up 选项直接塞进 event_msg.request_user_input，这里锁住本地 plan 收尾入口。
     func testPendingUserInputParsesEventMsgPlanCompletionOptions() async throws {
         let transcript = #"""
         {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}}
@@ -79,6 +82,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(interaction.transport, .codexLocal(callId: "call_exit_plan_followup", turnId: "turn-1"))
     }
 
+    // follow-up 选项不能在 turn/task complete 时被立刻清掉，要保留到下一次 task_started。
     func testPendingUserInputSurvivesTurnCompleteUntilNextTaskStarts() async throws {
         let transcript = #"""
         {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}}
@@ -102,6 +106,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(interaction.questions.count, 1)
     }
 
+    // 一旦新任务开始，旧 plan follow-up 必须被清空，避免 UI 继续显示过期选项。
     func testTaskStartedClearsPreviousPendingUserInput() async throws {
         let transcript = #"""
         {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","payload":{"turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}}
@@ -119,6 +124,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertTrue(interactions.isEmpty)
     }
 
+    // 某些真实 transcript 只有 proposed_plan 文本和 task_complete；parser 需要合成二选一 follow-up。
     func testProposedPlanBlockSynthesizesFollowupInteraction() async throws {
         let transcript = #"""
         {"timestamp":"2026-04-03T09:17:29Z","type":"turn_context","payload":{"turn_id":"turn-1","collaboration_mode":{"mode":"plan","settings":{"model":"gpt-5.4","reasoning_effort":"high"}}}}
@@ -151,6 +157,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertFalse(messages.first?.textContent.contains("</proposed_plan>") ?? true)
     }
 
+    // 真实 rollout 里还见过扁平 event_msg 结构；这里防止 parser 只兼容旧的 payload.payload 嵌套格式。
     func testPendingUserInputParsesFlatEventMsgFormat() async throws {
         let transcript = #"""
         {"timestamp":"2026-04-03T08:43:40Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","model_context_window":950000,"collaboration_mode_kind":"plan"}}
@@ -172,6 +179,7 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(interaction.questions.first?.question, "要执行这份报告，还是继续留在 Plan 模式里提问？")
     }
 
+    // 每个用例都写独立 rollout.jsonl，尽量贴近真实 transcript 文件读取路径。
     private func makeTranscriptFile(contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString,
