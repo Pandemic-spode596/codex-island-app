@@ -3,6 +3,7 @@ import XCTest
 
 @MainActor
 final class RemoteSessionMonitorTests: XCTestCase {
+    // 这里锁住远端监控器的核心状态机：host 更新、optimistic send、thread 选择、事件应用和 transcript fallback。
     func testUpdateHostClearsOldThreadsWhenSSHTargetChanges() async throws {
         let logger = TestDiagnosticsLogger()
         let originalHost = RemoteHostConfig(
@@ -134,6 +135,7 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertNil(monitor.hostActionErrors[host.id])
     }
 
+    // start/send timeout 会走 optimistic 路径；这些回归确保临时 user item 能补上、合并或回滚。
     func testSendMessageAddsOptimisticUserItemOnTimeout() async throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
@@ -283,6 +285,7 @@ final class RemoteSessionMonitorTests: XCTestCase {
         }
     }
 
+    // 事件应用层不仅维护 phase，也负责把 plan、token usage、approval 和 user input 翻译成可见状态。
     func testTurnPlanUpdatedAddsTodoWriteHistoryItem() throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
@@ -501,6 +504,7 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertTrue(updated.pendingInteractions.isEmpty)
     }
 
+    // thread/list 会对同 host + cwd 的线程做折叠，但选择规则必须优先保留更“活跃”的那条。
     func testThreadListCollapsesSameSSHAndCwdToLatestThread() {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
@@ -1060,6 +1064,7 @@ final class RemoteSessionMonitorTests: XCTestCase {
         XCTAssertFalse(second.canSendMessage)
     }
 
+    // transcript fallback 只在 app-server 快照不足时兜底，而且不能把更新鲜的 processing 状态覆盖回 idle。
     func testFreshIdleThreadStartsAsProcessingWhileTranscriptFallbackIsPending() {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
@@ -1186,6 +1191,7 @@ final class RemoteSessionMonitorTests: XCTestCase {
         )
     }
 
+    // 显式 open/start fresh 建立的 preferred thread 选择，后续 refresh 不能再被同 cwd 的别的线程顶掉。
     func testOpenThreadKeepsExplicitSameCwdSelectionAfterRefresh() async throws {
         let logger = TestDiagnosticsLogger()
         let connection = FakeRemoteConnection()
