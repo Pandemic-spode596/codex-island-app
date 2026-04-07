@@ -350,6 +350,9 @@ class CodexSessionMonitor: ObservableObject {
     }
 
     private func syntheticSession(from thread: RemoteThreadState) -> SessionState {
+        // Local app-server threads can outlive the SessionStore metadata that
+        // originally spawned them. When that happens we synthesize a minimal
+        // SessionState so the UI can still list, resume, and message the thread.
         SessionState(
             sessionId: thread.threadId,
             logicalSessionId: thread.logicalSessionId,
@@ -385,6 +388,9 @@ class CodexSessionMonitor: ObservableObject {
         for thread: RemoteThreadState,
         metadataSession: SessionState
     ) -> SessionState {
+        // Metadata from SessionStore still owns terminal binding, process ids,
+        // transcript paths, and hook-derived state. The app-server thread then
+        // overlays fresher chat/runtime/pending information on top.
         var merged = SessionState(
             sessionId: thread.threadId,
             logicalSessionId: thread.logicalSessionId,
@@ -626,6 +632,9 @@ class CodexSessionMonitor: ObservableObject {
             return session
         }
 
+        // App-server state wins only for fields it can observe more accurately
+        // than SessionStore: live pending interactions, transcript-backed
+        // history, phase, and turn-scoped runtime info.
         var merged = session
         if let threadPendingInteraction = thread.primaryPendingInteraction {
             merged.pendingInteractions = [threadPendingInteraction]
@@ -659,6 +668,10 @@ class CodexSessionMonitor: ObservableObject {
     }
 
     private func mergedVisibleSessions(from sessions: [SessionState]) -> [SessionState] {
+        // The visible list merges three sources:
+        // 1) non-Codex sessions from SessionStore unchanged,
+        // 2) Codex sessions that can be matched to a local app-server thread,
+        // 3) synthetic app-server threads that no longer have SessionStore metadata.
         let localStoreSessions = sessions.filter { $0.provider == .codex }
         let matchedStoreSessions = localStoreSessionByThreadId(from: localStoreSessions)
         let localThreadSessions = localAppServerThreads.values
@@ -738,6 +751,9 @@ class CodexSessionMonitor: ObservableObject {
 
         let normalizedCwd = normalizedCwdIdentity(session.cwd)
         guard !normalizedCwd.isEmpty else { return nil }
+        // Cwd-only matching is a last resort for older sessions that predate
+        // persisted thread ids. It is intentionally weak and only used when we
+        // cannot recover a stronger match from session id or transcript path.
         return localAppServerThreads.values.first {
             normalizedCwdIdentity($0.cwd) == normalizedCwd
         }
@@ -859,6 +875,10 @@ class CodexSessionMonitor: ObservableObject {
         }
         let candidateThreadIDs = appServerCandidateThreadIDs(for: session)
 
+        // A local session may be addressable by the persisted session id, an id
+        // embedded in the transcript filename, or a thread discovered after a
+        // refresh/open cycle. We try those progressively before declaring the
+        // app-server thread missing.
         if let thread = findKnownAppServerThread(
             for: session,
             candidateThreadIDs: candidateThreadIDs
@@ -962,6 +982,9 @@ class CodexSessionMonitor: ObservableObject {
         appendCandidate(session.sessionId)
 
         if let transcriptPath = session.transcriptPath {
+            // Transcript filenames often carry the canonical app-server thread
+            // id as a trailing UUID-like segment. Preserve it as a recovery key
+            // so reopened sessions can reconnect after metadata drift.
             let filename = URL(fileURLWithPath: transcriptPath).deletingPathExtension().lastPathComponent
             if let match = filename.range(
                 of: #"[0-9a-f]{8,}-[0-9a-f-]{20,}$"#,

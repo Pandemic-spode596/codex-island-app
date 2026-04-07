@@ -39,6 +39,9 @@ nonisolated enum RemoteApprovalKind: String, Sendable {
     case permissions
 }
 
+// RemotePendingApproval stores the server-facing request identity alongside the
+// user-facing approval metadata so the same model can drive both UI rendering
+// and approval responses.
 nonisolated struct RemotePendingApproval: Identifiable, Equatable, Sendable {
     let id: String
     let requestId: RemoteRPCID
@@ -89,6 +92,9 @@ nonisolated struct RemoteThreadTurnContext: Equatable, Sendable {
     }
 }
 
+// RemoteThreadState is the UI-facing projection of one logical remote session.
+// It may represent a raw app-server thread directly, or a collapsed view chosen
+// from several raw threads that share the same host/cwd identity.
 nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     let hostId: String
     let hostName: String
@@ -193,6 +199,9 @@ nonisolated struct RemoteThreadState: Identifiable, Equatable, Sendable {
     }
 
     var primaryPendingInteraction: PendingInteraction? {
+        // Prefer fully parsed PendingInteraction values when available. Older
+        // server approval flows still arrive as RemotePendingApproval and are
+        // bridged into the unified UI model lazily here.
         if let pending = pendingInteractions.first {
             return pending
         }

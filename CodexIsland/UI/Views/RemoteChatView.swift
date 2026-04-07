@@ -13,6 +13,9 @@ enum RemoteChatSubmitAction: Equatable {
     case rejectSlashCommand(String)
 }
 
+// Remote slash commands mirror the local composer UX, but every action goes
+// through RemoteSessionMonitor so the selected host and visible thread stay in
+// sync with the app-server's canonical state.
 enum RemoteSlashCommand: String, CaseIterable, Identifiable {
     case plan = "/plan"
     case model = "/model"
@@ -1003,6 +1006,9 @@ struct RemoteChatView: View {
             resumeCandidates = []
         }
         do {
+            // Refresh first so the resume sheet reflects the latest remote
+            // thread list instead of whichever snapshot happened to be cached
+            // when the notch view was opened.
             try await remoteSessionMonitor.refreshHostNow(id: thread.hostId)
             let candidates = remoteSessionMonitor.availableThreads(
                 hostId: thread.hostId,
@@ -1036,6 +1042,9 @@ struct RemoteChatView: View {
             let planMask = modes.first(where: { $0.mode == .plan })
             let defaultMask = modes.first(where: { $0.mode == .default })
             let currentContext = thread.turnContext
+            // Like the local chat view, bare /plan toggles the collaboration
+            // mode for the next turn, while /plan <prompt> immediately sends a
+            // prompt after the context update succeeds.
             let togglingOff = args == nil && isPlanModeActive
 
             if togglingOff {
@@ -1213,6 +1222,9 @@ struct RemoteChatView: View {
         }
 
         do {
+            // /new intentionally asks RemoteSessionMonitor for a brand-new
+            // thread on the same host instead of cloning the current thread's
+            // in-memory state. The returned thread becomes the new UI binding.
             let opened = try await remoteSessionMonitor.startFreshThread(hostId: thread.hostId)
             await MainActor.run {
                 activeSlashPanel = nil
@@ -1238,6 +1250,9 @@ struct RemoteChatView: View {
         }
 
         do {
+            // Resuming always reopens by raw host/thread id so the view lands on
+            // the remote monitor's canonical visible thread, even if the local
+            // copy was only a lightweight candidate summary.
             let opened = try await remoteSessionMonitor.openThread(
                 hostId: candidate.hostId,
                 threadId: candidate.threadId

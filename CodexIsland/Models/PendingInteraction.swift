@@ -7,6 +7,9 @@
 
 import Foundation
 
+// Pending interactions normalize local Codex tool calls, remote app-server
+// requests, and hook approvals into one UI contract so the same SwiftUI bars
+// can render and respond to every interactive stop point.
 nonisolated enum PendingInteractionTransport: Equatable, Sendable {
     case codexLocal(callId: String?, turnId: String?)
     case remoteAppServer(requestId: RemoteRPCID)
@@ -55,6 +58,9 @@ nonisolated struct PendingInteractionOption: Equatable, Sendable {
     let description: String?
 }
 
+// A question may still be rendered read-only even when it is user-visible; the
+// inline composer only supports non-secret free-text prompts or explicit choice
+// lists that can be mapped back to answer payloads.
 nonisolated struct PendingInteractionQuestion: Equatable, Sendable {
     let id: String
     let header: String
@@ -150,6 +156,9 @@ nonisolated struct PendingApprovalInteraction: Identifiable, Equatable, Sendable
     let transport: PendingInteractionTransport
 
     var summaryText: String {
+        // Detail wins because command/file approvals usually need to show the
+        // concrete payload first. Permission-only prompts fall back to the
+        // synthesized permission summary when no explicit detail was provided.
         if let detail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return detail
         }
@@ -216,5 +225,7 @@ nonisolated enum PendingInteraction: Identifiable, Equatable, Sendable {
 }
 
 nonisolated struct PendingInteractionAnswerPayload: Equatable, Sendable {
+    // Values stay as arrays because request_user_input can return either a
+    // single answer or a multi-select choice list for the same question id.
     let answers: [String: [String]]
 }

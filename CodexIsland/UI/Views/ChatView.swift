@@ -14,6 +14,9 @@ private enum LocalChatSubmitAction: Equatable {
     case rejectSlashCommand(String)
 }
 
+// Local slash commands are implemented entirely on top of the local app-server
+// session layer. They never travel through transcript parsing, so the view must
+// decide up front whether to send a user turn or open a configuration panel.
 private enum LocalSlashCommand: String, CaseIterable, Identifiable {
     case plan = "/plan"
     case model = "/model"
@@ -1194,6 +1197,10 @@ struct ChatView: View {
     }
 
     private func handleSlashCommand(_ command: LocalSlashCommand, args: String?) {
+        // /plan, /model, and /permissions all mutate turn context on the
+        // currently selected local app-server thread, so they are disabled
+        // while a turn is running. /new and /resume operate at the thread layer
+        // and stay available even when the visible session is synthetic.
         let canConfigureSession = localAppServerThread?.canStartTurn ?? canSendMessages
         if command.requiresStartableSession && !canConfigureSession {
             slashFeedbackMessage = "'/\(command.bareName)' is disabled while a task is in progress."
@@ -1366,6 +1373,9 @@ struct ChatView: View {
             let planMask = modes.first(where: { $0.mode == .plan })
             let defaultMask = modes.first(where: { $0.mode == .default })
             let currentContext = currentThread.turnContext
+            // Bare /plan acts as a toggle between the server's plan/default
+            // collaboration masks. /plan <prompt> first switches to plan mode
+            // and then immediately submits the inline prompt as the next turn.
             let togglingOff = args == nil && isPlanModeActive
 
             if togglingOff {
@@ -1551,6 +1561,9 @@ struct ChatView: View {
         }
 
         do {
+            // Keep the cwd from the current logical session so /new creates a
+            // blank thread in the same workspace instead of dropping the user
+            // back to the local app-server default directory.
             let opened = try await sessionMonitor.startFreshLocalThread(cwd: latestSession.cwd)
             await MainActor.run {
                 dismissSlashPanel()
@@ -1576,6 +1589,9 @@ struct ChatView: View {
         }
 
         do {
+            // Resume works on saved thread ids exposed by CodexSessionMonitor.
+            // The view swaps its preferred session immediately so the notch can
+            // rebind to the reopened thread without recreating the whole scene.
             let opened = try await sessionMonitor.openLocalThread(threadId: candidate.sessionId)
             await MainActor.run {
                 dismissSlashPanel()

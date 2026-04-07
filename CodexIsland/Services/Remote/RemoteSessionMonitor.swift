@@ -423,6 +423,10 @@ final class RemoteSessionMonitor: ObservableObject {
         host: RemoteHostConfig?,
         remoteThreads: [RemoteAppServerThread]
     ) -> [RemoteAppServerThread] {
+        // Refreshes can temporarily omit the thread currently shown in the UI
+        // while a host is reconnecting or applying filters. We retain preferred
+        // raw threads so the visible logical session does not disappear and then
+        // reappear a moment later.
         let remoteThreadIds = Set(remoteThreads.map(\.id))
         return rawThreads(hostId: hostId).filter { thread in
             guard !remoteThreadIds.contains(thread.id) else { return false }
@@ -459,6 +463,9 @@ final class RemoteSessionMonitor: ObservableObject {
     private func resolveThreadFilter(for host: RemoteHostConfig) {
         hostThreadFilterTasks[host.id]?.cancel()
 
+        // defaultCwd is applied in two stages: first with a cheap local
+        // normalized path, then upgraded with a server-resolved display filter
+        // once the remote connection can canonicalize symlinks/home expansion.
         if let provisional = provisionalThreadFilter(for: host) {
             hostThreadFilters[host.id] = provisional
             applyThreadFilter(for: host)
@@ -1239,6 +1246,9 @@ final class RemoteSessionMonitor: ObservableObject {
         )
         replaceRawThreads(hostId: hostId, with: remoteThreads, retaining: retainedThreads)
         let visibleThreads = rawThreads(hostId: hostId).filter { shouldDisplayThread($0, for: host) }
+        // Multiple raw threads from the same host/cwd collapse into one logical
+        // session. The rest of the monitor works on that logical layer so the
+        // notch shows one entry per workspace instead of every historic thread.
         let groupedThreads = Dictionary(grouping: visibleThreads) { thread in
             logicalSessionId(
                 sshTarget: host?.sshTarget ?? "",
@@ -1280,6 +1290,9 @@ final class RemoteSessionMonitor: ObservableObject {
             selectedThread = preferredThread
         } else {
             clearPreferredThreadBinding(logicalSessionId: logicalSessionId)
+            // Without a preferred binding we pick the most active/recent raw
+            // thread so reconnects and refreshes naturally bias toward the
+            // currently "live" conversation for that cwd.
             guard let latestThread = latestThread(from: visibleCandidates) else { return }
             selectedThread = latestThread
         }
@@ -1351,6 +1364,10 @@ final class RemoteSessionMonitor: ObservableObject {
             threads[index].connectionState = connectionState
 
             if let computedHistory {
+                // A loaded thread snapshot replaces history wholesale because
+                // turns from the server are authoritative and already ordered.
+                // Optimistic local messages are cleared once the real turn list
+                // arrives for that raw thread id.
                 threads[index].history = computedHistory
                 threads[index].activeTurnId = computedTurn?.id
                 threads[index].canSteerTurn = computedTurn != nil
@@ -1535,6 +1552,9 @@ final class RemoteSessionMonitor: ObservableObject {
         }
 
         let inferredPhase = inferredVisiblePhase(for: thread)
+        // Transcript fallback is only used for idle/waiting threads where the
+        // raw thread list may lag behind richer transcript state such as plan
+        // follow-up prompts or pending interactions.
         let shouldSync = inferredPhase == .idle || inferredPhase == .waitingForInput
         guard shouldSync else {
             Task {
@@ -1737,6 +1757,9 @@ final class RemoteSessionMonitor: ObservableObject {
 
         let currentPhase = threads[index].phase
         let transcriptPhase = snapshot.transcriptPhase
+        // Transcript fallback is allowed to promote an idle thread into a more
+        // descriptive waiting state, but it should not stomp active live state
+        // unless the current view is effectively idle or waiting for a plan reply.
         let shouldOverridePhase = transcriptPhase != nil && (
             currentPhase == .idle ||
                 (threads[index].turnContext.collaborationMode?.mode == .plan &&
