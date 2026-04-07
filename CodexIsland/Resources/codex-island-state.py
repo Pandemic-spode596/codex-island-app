@@ -22,12 +22,46 @@ def utc_timestamp():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def append_debug(record):
+def emit_stderr_diagnostic(stage, message, **context):
+    payload = {
+        "timestamp": utc_timestamp(),
+        "stage": stage,
+        "message": message,
+    }
+    if context:
+        payload["context"] = context
+
     try:
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        sys.stderr.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
     except OSError:
         pass
+
+
+def append_debug(record, allow_stderr_fallback=True):
+    try:
+        os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except (OSError, TypeError, ValueError) as error:
+        if allow_stderr_fallback:
+            emit_stderr_diagnostic(
+                "debug_log_write_failed",
+                str(error),
+                debug_log_path=DEBUG_LOG_PATH,
+            )
+        return False
+
+
+def record_diagnostic(stage, message, **context):
+    emit_stderr_diagnostic(stage, message, **context)
+    append_debug({
+        "timestamp": utc_timestamp(),
+        "stage": stage,
+        "message": message,
+        "context": context,
+    }, allow_stderr_fallback=False)
 
 
 def get_tty():
@@ -43,8 +77,17 @@ def get_tty():
         tty = result.stdout.strip()
         if tty and tty not in {"??", "-"}:
             return tty if tty.startswith("/dev/") else f"/dev/{tty}"
-    except Exception:
-        pass
+        if result.returncode != 0:
+            record_diagnostic(
+                "tty_probe_failed",
+                "ps tty lookup failed",
+                parent_pid=parent_pid,
+                returncode=result.returncode,
+                stderr=result.stderr.strip(),
+                stdout=result.stdout.strip(),
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        record_diagnostic("tty_probe_failed", str(error), parent_pid=parent_pid, strategy="ps")
 
     try:
         return os.ttyname(sys.stdin.fileno())
@@ -99,8 +142,10 @@ end tell
         )
         if result.returncode != 0:
             return {}, {"strategy": "ghostty_enumeration_failed", "error": result.stderr.strip() or result.stdout.strip()}
-    except Exception:
-        return {}, {"strategy": "ghostty_enumeration_exception"}
+    except (OSError, subprocess.SubprocessError) as error:
+        message = str(error)
+        record_diagnostic("terminal_context_probe_failed", message, terminal_name=terminal_name, cwd=cwd)
+        return {}, {"strategy": "ghostty_enumeration_exception", "error": message}
 
     normalized_cwd = normalize_path(cwd)
     candidates = []
@@ -171,19 +216,19 @@ def send_event(state):
     needs to deliver the initial JSON payload and record local debug evidence if delivery fails.
     """
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        sock.connect(SOCKET_PATH)
-        sock.sendall(json.dumps(state).encode())
-        sock.close()
+        payload = json.dumps(state).encode()
+    except (TypeError, ValueError) as error:
+        record_diagnostic("socket_payload_encode_failed", str(error), state=state)
+        return False
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(2)
+            sock.connect(SOCKET_PATH)
+            sock.sendall(payload)
         return True
     except OSError as error:
-        append_debug({
-            "timestamp": utc_timestamp(),
-            "stage": "socket_error",
-            "error": str(error),
-            "state": state,
-        })
+        record_diagnostic("socket_error", str(error), socket_path=SOCKET_PATH, state=state)
         return False
 
 
@@ -224,72 +269,82 @@ def main():
     # nothing meaningful to forward, so exit non-zero and let Codex treat the hook as failed.
     try:
         payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
+        raw = ""
+        try:
+            raw = sys.stdin.read(512)
+        except OSError:
+            pass
+        record_diagnostic("stdin_decode_failed", str(error), raw_input_preview=raw)
         sys.exit(1)
 
-    event = payload.get("hook_event_name", "")
-    session_id = payload.get("session_id", "unknown")
-    cwd = payload.get("cwd", "")
-    transcript_path = payload.get("transcript_path")
-    turn_id = payload.get("turn_id")
-    tool_name, tool_input = normalize_tool_input(payload)
-    terminal_name = os.environ.get("TERM_PROGRAM") or os.environ.get("TERM")
+    try:
+        event = payload.get("hook_event_name", "")
+        session_id = payload.get("session_id", "unknown")
+        cwd = payload.get("cwd", "")
+        transcript_path = payload.get("transcript_path")
+        turn_id = payload.get("turn_id")
+        tool_name, tool_input = normalize_tool_input(payload)
+        terminal_name = os.environ.get("TERM_PROGRAM") or os.environ.get("TERM")
 
-    terminal_context, terminal_context_debug = get_terminal_context(terminal_name, cwd)
+        terminal_context, terminal_context_debug = get_terminal_context(terminal_name, cwd)
 
-    state = {
-        "provider": "codex",
-        "session_id": session_id,
-        "cwd": cwd,
-        "transcript_path": transcript_path,
-        "turn_id": turn_id,
-        "event": event,
-        "pid": os.getppid(),
-        "tty": get_tty(),
-        "terminal_name": terminal_name,
-    }
-    state.update(terminal_context)
+        state = {
+            "provider": "codex",
+            "session_id": session_id,
+            "cwd": cwd,
+            "transcript_path": transcript_path,
+            "turn_id": turn_id,
+            "event": event,
+            "pid": os.getppid(),
+            "tty": get_tty(),
+            "terminal_name": terminal_name,
+        }
+        state.update(terminal_context)
 
-    # Keep status mapping intentionally coarse. transcript_path remains the durable source of truth;
-    # this socket payload only gives the app an immediate hint for UI updates before reconciliation.
-    if event == "SessionStart":
-        state["status"] = "waiting_for_input"
-    elif event == "UserPromptSubmit":
-        state["status"] = "processing"
-    elif event == "PreToolUse":
-        state["status"] = "running_tool"
-        state["tool"] = tool_name
-        state["tool_input"] = tool_input
-        state["tool_use_id"] = payload.get("tool_use_id")
-    elif event == "PostToolUse":
-        state["status"] = "processing"
-        state["tool"] = tool_name
-        state["tool_input"] = tool_input
-        state["tool_use_id"] = payload.get("tool_use_id")
-    elif event == "Stop":
-        state["status"] = "waiting_for_input"
-    else:
-        # Unknown/new hook events should still reach the app for logging and future compatibility
-        # instead of being dropped by an overly strict local script.
-        state["status"] = "notification"
+        # Keep status mapping intentionally coarse. transcript_path remains the durable source of truth;
+        # this socket payload only gives the app an immediate hint for UI updates before reconciliation.
+        if event == "SessionStart":
+            state["status"] = "waiting_for_input"
+        elif event == "UserPromptSubmit":
+            state["status"] = "processing"
+        elif event == "PreToolUse":
+            state["status"] = "running_tool"
+            state["tool"] = tool_name
+            state["tool_input"] = tool_input
+            state["tool_use_id"] = payload.get("tool_use_id")
+        elif event == "PostToolUse":
+            state["status"] = "processing"
+            state["tool"] = tool_name
+            state["tool_input"] = tool_input
+            state["tool_use_id"] = payload.get("tool_use_id")
+        elif event == "Stop":
+            state["status"] = "waiting_for_input"
+        else:
+            # Unknown/new hook events should still reach the app for logging and future compatibility
+            # instead of being dropped by an overly strict local script.
+            state["status"] = "notification"
 
-    sent = send_event(state)
-    # Debug logs are best-effort local breadcrumbs for field diagnosis. They intentionally include
-    # both the raw payload and normalized state so socket/terminal mismatches can be reconstructed.
-    append_debug({
-        "timestamp": utc_timestamp(),
-        "stage": "hook_received",
-        "event": event,
-        "sent": sent,
-        "payload": payload,
-        "state": state,
-        "env": {
-            "TERM_PROGRAM": os.environ.get("TERM_PROGRAM"),
-            "TERM": os.environ.get("TERM"),
-            "TMUX": os.environ.get("TMUX"),
-        },
-        "terminal_context_debug": terminal_context_debug,
-    })
+        sent = send_event(state)
+        # Debug logs are best-effort local breadcrumbs for field diagnosis. They intentionally include
+        # both the raw payload and normalized state so socket/terminal mismatches can be reconstructed.
+        append_debug({
+            "timestamp": utc_timestamp(),
+            "stage": "hook_received",
+            "event": event,
+            "sent": sent,
+            "payload": payload,
+            "state": state,
+            "env": {
+                "TERM_PROGRAM": os.environ.get("TERM_PROGRAM"),
+                "TERM": os.environ.get("TERM"),
+                "TMUX": os.environ.get("TMUX"),
+            },
+            "terminal_context_debug": terminal_context_debug,
+        })
+    except Exception as error:
+        record_diagnostic("hook_processing_failed", str(error), payload=payload)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

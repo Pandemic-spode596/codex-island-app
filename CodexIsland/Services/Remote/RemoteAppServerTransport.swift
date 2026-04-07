@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import os.log
 
 /// Line-oriented app-server transport used by both local and SSH-backed
 /// connections. Implementations are responsible for surfacing stdout, stderr,
@@ -24,6 +25,8 @@ nonisolated protocol RemoteAppServerTransport: Sendable {
 /// callbacks. The monitor owns higher-level protocol framing; this type only
 /// guarantees byte transport and lifecycle notifications.
 final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
+    nonisolated private static let logger = Logger(subsystem: "com.codexisland", category: "RemoteTransport")
+
     private let executableURL: URL
     private let arguments: [String]
     private let ioQueue: DispatchQueue
@@ -92,29 +95,22 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
         guard let data = line.data(using: .utf8) else {
             throw RemoteSessionError.transport("Failed to encode app-server message")
         }
-        try stdinHandle.write(contentsOf: data)
-        try stdinHandle.write(contentsOf: Data([0x0A]))
+        do {
+            try stdinHandle.write(contentsOf: data)
+            try stdinHandle.write(contentsOf: Data([0x0A]))
+        } catch {
+            Self.logger.error("Failed to write app-server stdin: \(error.localizedDescription, privacy: .public)")
+            throw RemoteSessionError.transport("Failed to send app-server message: \(error.localizedDescription)")
+        }
     }
 
     func stop() async {
-        // Cancel readers first so no more callbacks race with teardown while
-        // stdin/process are being closed underneath them.
-        stdoutSource?.cancel()
-        stderrSource?.cancel()
-        stdoutSource = nil
-        stderrSource = nil
+        stopReaders()
         stdoutBuffer.removeAll(keepingCapacity: false)
         stderrBuffer.removeAll(keepingCapacity: false)
 
-        try? stdinHandle?.close()
-        stdinHandle = nil
-
-        if let process {
-            if process.isRunning {
-                process.terminate()
-            }
-            self.process = nil
-        }
+        closeStdinHandle()
+        terminateProcessIfNeeded()
     }
 
     private func startReaders(
@@ -128,7 +124,7 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
             self?.drainStdout(handle: stdout, forward: onStdoutLine)
         }
         stdoutSource.setCancelHandler {
-            try? stdout.close()
+            Self.closeReadHandle(stdout, label: "stdout")
         }
         stdoutSource.resume()
         self.stdoutSource = stdoutSource
@@ -138,7 +134,7 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
             self?.drainStderr(handle: stderr, forward: onStderrLine)
         }
         stderrSource.setCancelHandler {
-            try? stderr.close()
+            Self.closeReadHandle(stderr, label: "stderr")
         }
         stderrSource.resume()
         self.stderrSource = stderrSource
@@ -147,7 +143,11 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
     private func configureNoSIGPIPE(for handle: FileHandle) {
         // Broken pipes should be reported as write failures, not crash the app
         // when the remote/local app-server exits before stdin is flushed.
-        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+        let result = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+        if result == -1 {
+            let message = String(cString: strerror(errno))
+            Self.logger.error("Failed to configure F_SETNOSIGPIPE: \(message, privacy: .public)")
+        }
     }
 
     private func drainStdout(
@@ -206,6 +206,43 @@ final class ProcessStdioTransport: RemoteAppServerTransport, @unchecked Sendable
 
         Task {
             await forward(line)
+        }
+    }
+
+    private func stopReaders() {
+        // Cancel readers first so no more callbacks race with teardown while
+        // stdin/process are being closed underneath them.
+        stdoutSource?.cancel()
+        stderrSource?.cancel()
+        stdoutSource = nil
+        stderrSource = nil
+    }
+
+    private func closeStdinHandle() {
+        guard let stdinHandle else { return }
+        defer { self.stdinHandle = nil }
+
+        do {
+            try stdinHandle.close()
+        } catch {
+            Self.logger.error("Failed to close stdin handle: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func terminateProcessIfNeeded() {
+        guard let process else { return }
+        defer { self.process = nil }
+
+        if process.isRunning {
+            process.terminate()
+        }
+    }
+
+    nonisolated private static func closeReadHandle(_ handle: FileHandle, label: String) {
+        do {
+            try handle.close()
+        } catch {
+            logger.error("Failed to close \(label, privacy: .public) handle: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

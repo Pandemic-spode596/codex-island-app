@@ -14,30 +14,11 @@ actor TerminalFocusCoordinator {
     private init() {}
 
     func focus(session: SessionState) async -> Bool {
-        if !session.isInTmux, await NativeTerminalScriptFocuser.shared.focus(session: session) {
+        if await canFocusWithNativeScript(session: session) {
             return true
         }
 
-        var target = session.focusTarget
-
-        if target == nil || session.focusCapability != .ready {
-            let resolution = await TerminalWindowResolver.shared.resolve(for: session)
-            target = resolution.focusTarget
-
-            if resolution.focusCapability == .ready, let resolvedTarget = target {
-                switch resolvedTarget.kind {
-                case .tmuxPane:
-                    return await focusTmuxTarget(session: session, target: resolvedTarget)
-                case .nativeWindow:
-                    let capability = await NativeTerminalWindowResolver.shared.focus(target: resolvedTarget)
-                    if capability == .ready {
-                        return true
-                    }
-                }
-            }
-        }
-
-        guard let target else {
+        guard let target = await preferredTarget(for: session) else {
             return await focusFallback(session: session)
         }
 
@@ -45,19 +26,52 @@ actor TerminalFocusCoordinator {
         case .tmuxPane:
             return await focusTmuxTarget(session: session, target: target)
         case .nativeWindow:
-            let capability = await NativeTerminalWindowResolver.shared.focus(target: target)
-            if capability == .stale {
-                let resolution = await TerminalWindowResolver.shared.resolve(for: session)
-                if let refreshedTarget = resolution.focusTarget,
-                   await NativeTerminalWindowResolver.shared.focus(target: refreshedTarget) == .ready {
-                    return true
-                }
-            }
-            if capability == .ready {
-                return true
-            }
+            return await focusNativeTarget(session: session, target: target)
+        }
+    }
+
+    private func canFocusWithNativeScript(session: SessionState) async -> Bool {
+        guard !session.isInTmux else { return false }
+        return await NativeTerminalScriptFocuser.shared.focus(session: session)
+    }
+
+    private func preferredTarget(for session: SessionState) async -> TerminalFocusTarget? {
+        if let target = session.focusTarget, session.focusCapability == .ready {
+            return target
+        }
+
+        let resolution = await TerminalWindowResolver.shared.resolve(for: session)
+        if resolution.focusCapability == .ready {
+            return resolution.focusTarget
+        }
+
+        return session.focusTarget ?? resolution.focusTarget
+    }
+
+    private func focusNativeTarget(session: SessionState, target: TerminalFocusTarget) async -> Bool {
+        if await NativeTerminalWindowResolver.shared.focus(target: target) == .ready {
+            return true
+        }
+
+        guard let refreshedTarget = await refreshedNativeTarget(for: session) else {
             return await focusFallback(session: session)
         }
+
+        if await NativeTerminalWindowResolver.shared.focus(target: refreshedTarget) == .ready {
+            return true
+        }
+
+        return await focusFallback(session: session)
+    }
+
+    private func refreshedNativeTarget(for session: SessionState) async -> TerminalFocusTarget? {
+        let resolution = await TerminalWindowResolver.shared.resolve(for: session)
+        guard resolution.focusCapability == .ready,
+              let target = resolution.focusTarget,
+              target.kind == .nativeWindow else {
+            return nil
+        }
+        return target
     }
 
     private func focusTmuxTarget(session: SessionState, target: TerminalFocusTarget) async -> Bool {
