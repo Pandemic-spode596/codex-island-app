@@ -7,6 +7,8 @@
 
 import Foundation
 
+// MARK: - Transport
+
 // Pending interactions normalize local Codex tool calls, remote app-server
 // requests, and hook approvals into one UI contract so the same SwiftUI bars
 // can render and respond to every interactive stop point.
@@ -22,6 +24,8 @@ nonisolated enum PendingInteractionTransport: Equatable, Sendable {
         return false
     }
 }
+
+// MARK: - Permissions
 
 nonisolated struct InteractionPermissionProfile: Equatable, Sendable {
     var networkEnabled: Bool?
@@ -53,6 +57,8 @@ nonisolated struct InteractionPermissionProfile: Equatable, Sendable {
     }
 }
 
+// MARK: - Questions
+
 nonisolated struct PendingInteractionOption: Equatable, Sendable {
     let label: String
     let description: String?
@@ -83,6 +89,8 @@ nonisolated struct PendingInteractionQuestion: Equatable, Sendable {
         return !isOther
     }
 }
+
+// MARK: - Interaction Payloads
 
 nonisolated struct PendingUserInputInteraction: Identifiable, Equatable, Sendable {
     nonisolated enum PresentationMode: Equatable, Sendable {
@@ -118,6 +126,8 @@ nonisolated struct PendingUserInputInteraction: Identifiable, Equatable, Sendabl
         return .string(id)
     }
 }
+
+// MARK: - Approvals
 
 nonisolated enum PendingApprovalKind: String, Equatable, Sendable {
     case commandExecution
@@ -168,6 +178,8 @@ nonisolated struct PendingApprovalInteraction: Identifiable, Equatable, Sendable
         return title
     }
 }
+
+// MARK: - Unified Interaction
 
 nonisolated enum PendingInteraction: Identifiable, Equatable, Sendable {
     case userInput(PendingUserInputInteraction)
@@ -224,6 +236,8 @@ nonisolated enum PendingInteraction: Identifiable, Equatable, Sendable {
     }
 }
 
+// request_user_input may legally produce one answer, many answers, or no
+// answers for the same question id depending on question type and UI path.
 nonisolated struct PendingInteractionAnswerPayload: Equatable, Sendable {
     // Values stay as arrays because request_user_input can return either a
     // single answer or a multi-select choice list for the same question id.
