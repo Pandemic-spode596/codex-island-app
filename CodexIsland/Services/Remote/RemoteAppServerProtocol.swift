@@ -7,6 +7,9 @@
 
 import Foundation
 
+// JSON-RPC envelopes from the remote app-server multiplex requests,
+// responses, and asynchronous notifications in the same transport stream.
+// Exactly one of method/result/error is typically populated for a given frame.
 nonisolated struct RemoteAppServerEnvelope: Codable, Sendable {
     let method: String?
     let id: RemoteRPCID?
@@ -51,6 +54,9 @@ nonisolated enum RemoteAppServerThreadStatus: Codable, Equatable, Sendable {
                 activeFlags: try container.decode([RemoteAppServerThreadActiveFlag].self, forKey: .activeFlags)
             )
         default:
+            // Unknown remote statuses should not abort the entire thread decode.
+            // We collapse them to systemError so the UI can still surface the
+            // rest of the thread metadata and items.
             self = .systemError
         }
     }
@@ -151,6 +157,9 @@ nonisolated enum RemoteAppServerApprovalPolicy: Codable, Equatable, Sendable {
     case granular
     case unsupported(String)
 
+    // The server currently emits either a simple string policy or a structured
+    // {"granular": ...} object. Unsupported raw values are preserved so newer
+    // deployments do not become undecodable before the client catches up.
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let rawValue = try? container.decode(String.self) {
@@ -238,6 +247,9 @@ nonisolated struct RemoteAppServerSandboxPolicy: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(String.self, forKey: .type)
 
+        // The wire format still uses legacy camelCase type names even though
+        // outbound requests from Codex Island use hyphenated mode identifiers.
+        // This decoder stays aligned with the server's response payloads.
         switch type {
         case "dangerFullAccess":
             self = .dangerFullAccess
@@ -255,6 +267,8 @@ nonisolated struct RemoteAppServerSandboxPolicy: Codable, Equatable, Sendable {
         case "externalSandbox":
             self = .externalSandbox
         default:
+            // Defaulting to readOnly is safer than assuming write access when an
+            // unknown sandbox type appears on an older client build.
             self = .readOnly(networkAccessEnabled: false)
         }
     }
@@ -397,6 +411,10 @@ extension RemoteAppServerSandboxMode {
 }
 
 extension RemoteAppServerSandboxPolicy {
+    // requestValue intentionally serializes the server's expected request
+    // schema rather than mirroring Codable output. The transport layer posts
+    // this dictionary as JSON, and the server currently expects camelCase keys
+    // plus the nested readOnlyAccess marker for workspace-write mode.
     nonisolated var requestValue: [String: Any] {
         switch mode {
         case .dangerFullAccess:
@@ -525,6 +543,9 @@ nonisolated enum RemoteAppServerUserInput: Codable, Equatable, Sendable {
         case "mention":
             self = .mention(try container.decode(String.self, forKey: .name))
         default:
+            // Preserve forward compatibility with newer item types by keeping
+            // the thread item decodable, even if the unknown input cannot be
+            // rendered or re-encoded with full fidelity.
             self = .unsupported
         }
     }
@@ -650,6 +671,9 @@ extension RemoteAppServerThreadItem: Codable {
         let type = try container.decode(String.self, forKey: .type)
         let id = try? container.decode(String.self, forKey: .id)
 
+        // Thread items are one of the highest-churn app-server payloads. We
+        // decode recognized shapes strictly enough to catch schema drift on
+        // known fields, but still retain the item id for unknown future types.
         switch type {
         case "userMessage":
             self = .userMessage(
@@ -754,6 +778,9 @@ extension RemoteAppServerThreadItem: Codable {
 }
 
 private extension KeyedDecodingContainer where K == RemoteAppServerThreadItem.CodingKeys {
+    // These helpers intentionally fail with an item-qualified decoding message
+    // instead of silently defaulting malformed values. Unknown item types are
+    // tolerated above; known item types should still surface contract breaks.
     func decodeLossyStringArray(
         forKey key: K,
         itemType: String
@@ -958,6 +985,9 @@ extension RemoteAppServerTokenUsageBreakdown {
 }
 
 nonisolated func remoteDecodeValue<T: Decodable>(_ value: AnyCodable, as type: T.Type) throws -> T {
+    // Remote envelopes arrive as AnyCodable because params/result payloads vary
+    // by method. Re-encoding through JSON keeps decoding rules consistent with
+    // the rest of the protocol models and avoids handwritten dictionary casts.
     let data = try JSONEncoder().encode(value)
     return try JSONDecoder().decode(type, from: data)
 }
