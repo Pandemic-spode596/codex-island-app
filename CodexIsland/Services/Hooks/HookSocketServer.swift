@@ -187,6 +187,9 @@ enum HookSocketIO {
         from clientSocket: Int32,
         timeout: TimeInterval = defaultTimeout
     ) throws -> HookEvent {
+        // Hooks usually send a single JSON document and then close their side of the socket,
+        // but writes may arrive in multiple chunks. Keep polling until we can decode a full
+        // event, EOF confirms the payload is complete, or the overall timeout expires.
         var allData = Data()
         var buffer = [UInt8](repeating: 0, count: bufferSize)
         let deadline = Date().addingTimeInterval(timeout)
@@ -275,6 +278,9 @@ enum HookSocketIO {
         writer: Writer? = nil,
         poller: Poller? = nil
     ) throws {
+        // Permission responses are tiny, but the hook still expects a complete JSON reply on
+        // the same socket it used for the request. Treat partial writes and EAGAIN as normal
+        // backpressure instead of silently dropping the approval decision.
         let writer = writer ?? defaultWriter
         let poller = poller ?? defaultPoller
         let deadline = Date().addingTimeInterval(timeout)
@@ -366,8 +372,9 @@ enum HookSocketIO {
     }
 }
 
-/// Unix domain socket server that receives events from Claude Code hooks
-/// Uses GCD DispatchSource for non-blocking I/O
+/// Unix domain socket server that bridges hook events into the app process.
+/// Non-permission events are fire-and-forget, but permission requests keep their client socket
+/// open until the UI sends a decision or the request is explicitly cancelled.
 class HookSocketServer {
     static let shared = HookSocketServer()
     static let socketPath = "/tmp/codex-island.sock"
@@ -378,13 +385,15 @@ class HookSocketServer {
     private var permissionFailureHandler: PermissionFailureHandler?
     private let queue = DispatchQueue(label: "com.codexisland.socket", qos: .userInitiated)
 
-    /// Pending permission requests indexed by toolUseId
+    /// Pending permission requests indexed by resolved toolUseId.
+    /// The stored socket is the return channel back to the original hook process, so entries
+    /// must stay alive until we answer, the tool completes elsewhere, or the session stops waiting.
     private var pendingPermissions: [String: PendingPermission] = [:]
     private let permissionsLock = NSLock()
 
-    /// Cache tool_use_id from PreToolUse to correlate with PermissionRequest
-    /// Key: "sessionId:toolName:serializedInput" -> Queue of tool_use_ids (FIFO)
-    /// PermissionRequest events don't include tool_use_id, so we cache from PreToolUse
+    /// Cache tool_use_id values from PreToolUse so a later PermissionRequest can be mapped back
+    /// to the concrete tool execution. The hook protocol does not guarantee tool_use_id is echoed
+    /// on the permission event, so we use a FIFO queue per "session + tool + normalized input".
     private var toolUseIdCache: [String: [String]] = [:]
     private let cacheLock = NSLock()
 
@@ -669,6 +678,8 @@ class HookSocketServer {
         }
 
         if event.expectsResponse {
+            // PermissionRequest is the only request/response exchange on this socket. We resolve
+            // the tool_use_id first, then retain the socket so SessionStore/UI can answer later.
             let toolUseId: String
             if let eventToolUseId = event.toolUseId {
                 toolUseId = eventToolUseId
@@ -749,6 +760,8 @@ class HookSocketServer {
             logger.debug("Write succeeded: \(data.count) bytes")
         } catch HookSocketIOError.timedOut(let message) {
             logger.error("Timed out writing permission response: \(message, privacy: .public)")
+            // Once the socket write fails, the originating hook will not receive a decision, so
+            // SessionStore must clear the pending approval from app state on the failure callback.
             permissionFailureHandler?(pending.sessionId, toolUseId)
         } catch HookSocketIOError.writeFailed(let code) {
             logger.error("Write failed with errno: \(code)")
