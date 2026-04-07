@@ -17,6 +17,8 @@ struct SSHConfigHostSuggestion: Identifiable, Equatable, Sendable {
 
     var id: String { alias }
 
+    /// Preview text shown under the alias in the picker. Keep it intentionally sparse so the
+    /// suggestion list stays lightweight and never competes with the user's free-form ssh target.
     var resolutionSummary: String? {
         let normalizedAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normalizedHostname = hostname?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -94,6 +96,8 @@ actor SSHConfigHostSuggestionProvider {
     }
 
     func loadSuggestions() async -> [SSHConfigHostSuggestion] {
+        // SSH config is only a convenience input source for the UI. If the file is missing or
+        // partially unreadable we simply return no suggestions rather than surfacing an error.
         guard fileManager.fileExists(atPath: configURL.path) else {
             return []
         }
@@ -123,6 +127,8 @@ actor SSHConfigHostSuggestionProvider {
     }
 
     private func discoverAliases(from fileURL: URL, visitedPaths: inout Set<String>) -> [String] {
+        // OpenSSH allows recursive Include chains. Track normalized paths so loops or repeated
+        // include fan-out do not duplicate aliases or recurse forever.
         let normalizedPath = fileURL.standardizedFileURL.path
         guard visitedPaths.insert(normalizedPath).inserted else {
             return []
@@ -142,12 +148,17 @@ actor SSHConfigHostSuggestionProvider {
 
             switch keyword {
             case "host":
+                // The suggestion list should only offer concrete aliases users can paste into the
+                // SSH Target field. Wildcards and negated host patterns influence matching rules
+                // inside ssh config, but they are not valid direct connection shortcuts.
                 for token in tokenize(value) where isConcreteHostAlias(token) {
                     let alias = token.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard seenAliases.insert(alias).inserted else { continue }
                     aliases.append(alias)
                 }
             case "include":
+                // Includes are resolved relative to the current file, mirroring OpenSSH behavior
+                // for nested config trees such as ~/.ssh/conf.d/*.conf.
                 for includePattern in tokenize(value) {
                     for includeURL in resolveIncludePatterns(includePattern, relativeTo: fileURL) {
                         let nestedAliases = discoverAliases(from: includeURL, visitedPaths: &visitedPaths)
@@ -177,6 +188,8 @@ actor SSHConfigHostSuggestionProvider {
     }
 
     private func stripComments(from rawLine: String) -> String {
+        // SSH config comments start at "#" unless the character is protected by quoting. We keep
+        // the parser minimal but quote-aware so Include paths and Host aliases survive intact.
         var result = ""
         var inSingleQuotes = false
         var inDoubleQuotes = false
@@ -218,6 +231,8 @@ actor SSHConfigHostSuggestionProvider {
     }
 
     private func tokenize(_ value: String) -> [String] {
+        // Host/Include directives accept space-separated tokens with basic shell-like quoting.
+        // We only need enough parsing to preserve quoted aliases and include globs faithfully.
         var tokens: [String] = []
         var current = ""
         var inSingleQuotes = false
@@ -296,6 +311,8 @@ actor SSHConfigHostSuggestionProvider {
     }
 
     private func resolveHost(alias: String) async -> ResolvedHost {
+        // Delegate final expansion to `ssh -G` so preview text reflects OpenSSH's own precedence
+        // rules instead of duplicating HostName/User/Port resolution in Swift.
         let result = await processExecutor.runWithResult(
             "/usr/bin/ssh",
             arguments: ["-G", "-F", configURL.path, alias]
@@ -350,6 +367,8 @@ final class SSHConfigSuggestionStore: ObservableObject {
     }
 
     func refreshIfNeeded() {
+        // Initial load is lazy because the remote hosts sheet should stay cheap until the user
+        // actually focuses the SSH target field or opens the host editor.
         guard !hasLoaded else { return }
         hasLoaded = true
         refresh()
