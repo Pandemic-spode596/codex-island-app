@@ -31,6 +31,7 @@ def append_debug(record):
 
 
 def get_tty():
+    """Best-effort TTY discovery for later terminal focus / fallback routing."""
     parent_pid = os.getppid()
     try:
         result = subprocess.run(
@@ -57,6 +58,14 @@ def get_tty():
 
 
 def get_terminal_context(terminal_name, cwd):
+    """
+    Recover stable terminal identifiers for terminals that expose AppleScript metadata.
+
+    The hook payload only tells us cwd and the current terminal program. For Ghostty we
+    opportunistically enumerate windows/tabs/surfaces and match by normalized cwd so the app
+    can later refocus the exact surface. This is intentionally best-effort: ambiguity or script
+    failures only affect focus precision, never whether the hook event is forwarded at all.
+    """
     normalized = (terminal_name or "").lower()
     if normalized != "ghostty":
         return {}, {"strategy": "unsupported_terminal"}
@@ -154,6 +163,13 @@ def normalize_path(path):
 
 
 def send_event(state):
+    """
+    Forward one normalized hook event to Codex Island over the Unix socket.
+
+    This helper is intentionally one-way: most hook events are fire-and-forget. Permission
+    request/response lifetimes are managed by the app's socket server, so the hook script only
+    needs to deliver the initial JSON payload and record local debug evidence if delivery fails.
+    """
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(2)
@@ -172,6 +188,13 @@ def send_event(state):
 
 
 def normalize_tool_input(payload):
+    """
+    Collapse historical hook payload shapes into the dict structure SessionStore expects.
+
+    Different Codex versions have surfaced command data at slightly different keys. We keep the
+    normalization conservative and only preserve the command when that is all we can recover, so
+    newer hooks stay rich while older hooks still correlate tool activity predictably.
+    """
     tool_name = payload.get("tool_name")
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, dict):
@@ -197,6 +220,8 @@ def normalize_tool_input(payload):
 
 
 def main():
+    # Hooks always pipe a single JSON object on stdin. If that contract is already broken there is
+    # nothing meaningful to forward, so exit non-zero and let Codex treat the hook as failed.
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
@@ -225,6 +250,8 @@ def main():
     }
     state.update(terminal_context)
 
+    # Keep status mapping intentionally coarse. transcript_path remains the durable source of truth;
+    # this socket payload only gives the app an immediate hint for UI updates before reconciliation.
     if event == "SessionStart":
         state["status"] = "waiting_for_input"
     elif event == "UserPromptSubmit":
@@ -242,9 +269,13 @@ def main():
     elif event == "Stop":
         state["status"] = "waiting_for_input"
     else:
+        # Unknown/new hook events should still reach the app for logging and future compatibility
+        # instead of being dropped by an overly strict local script.
         state["status"] = "notification"
 
     sent = send_event(state)
+    # Debug logs are best-effort local breadcrumbs for field diagnosis. They intentionally include
+    # both the raw payload and normalized state so socket/terminal mismatches can be reconstructed.
     append_debug({
         "timestamp": utc_timestamp(),
         "stage": "hook_received",
