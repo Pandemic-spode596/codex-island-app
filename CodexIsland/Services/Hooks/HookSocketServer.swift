@@ -363,11 +363,11 @@ enum HookSocketIO {
         return text
     }
 
-    private static func defaultWriter(fd: Int32, buffer: UnsafeRawPointer, count: Int) -> Int {
+    private nonisolated static func defaultWriter(fd: Int32, buffer: UnsafeRawPointer, count: Int) -> Int {
         write(fd, buffer, count)
     }
 
-    private static func defaultPoller(fds: UnsafeMutablePointer<pollfd>?, nfds: nfds_t, timeout: Int32) -> Int32 {
+    private nonisolated static func defaultPoller(fds: UnsafeMutablePointer<pollfd>?, nfds: nfds_t, timeout: Int32) -> Int32 {
         poll(fds, nfds, timeout)
     }
 }

@@ -31,12 +31,12 @@ enum NotificationSound: String, CaseIterable {
     }
 }
 
-enum AppSettings {
-    private static let defaults = UserDefaults.standard
+nonisolated enum AppSettings {
+    nonisolated(unsafe) private static let defaults = UserDefaults.standard
 
     // MARK: - Keys
 
-    private enum Keys {
+    nonisolated private enum Keys {
         static let notificationSound = "notificationSound"
         static let remoteHosts = "remoteHosts"
         static let remoteDiagnosticsLoggingEnabled = "remoteDiagnosticsLoggingEnabled"
@@ -45,7 +45,7 @@ enum AppSettings {
     // MARK: - Notification Sound
 
     /// The sound to play when Claude finishes and is ready for input
-    static var notificationSound: NotificationSound {
+    nonisolated static var notificationSound: NotificationSound {
         get {
             guard let rawValue = defaults.string(forKey: Keys.notificationSound),
                   let sound = NotificationSound(rawValue: rawValue) else {
@@ -60,7 +60,7 @@ enum AppSettings {
 
     // MARK: - Remote Hosts
 
-    static var remoteHosts: [RemoteHostConfig] {
+    nonisolated static var remoteHosts: [RemoteHostConfig] {
         get {
             guard let data = defaults.data(forKey: Keys.remoteHosts) else {
                 return []
@@ -84,7 +84,7 @@ enum AppSettings {
 
     // MARK: - Remote Diagnostics Logging
 
-    static var remoteDiagnosticsLoggingEnabled: Bool {
+    nonisolated static var remoteDiagnosticsLoggingEnabled: Bool {
         get {
             defaults.bool(forKey: Keys.remoteDiagnosticsLoggingEnabled)
         }
