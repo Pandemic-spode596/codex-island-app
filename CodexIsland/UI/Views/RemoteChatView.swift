@@ -87,13 +87,13 @@ enum RemoteSlashCommand: String, CaseIterable, Identifiable {
     }
 }
 
-private enum RemoteSlashPanel: Equatable {
+enum RemoteSlashPanel: Equatable {
     case model
     case permissions
     case resume
 }
 
-private struct RemoteApprovalPreset: Identifiable, Equatable {
+struct RemoteApprovalPreset: Identifiable, Equatable {
     let id: String
     let label: String
     let description: String
@@ -145,6 +145,7 @@ struct RemoteChatView: View {
     @State private var selectedModelForEffort: RemoteAppServerModel?
     @State private var resumeCandidates: [RemoteThreadState] = []
     @FocusState private var isInputFocused: Bool
+    @State private var isHeaderHovered = false
 
     init(
         initialThread: RemoteThreadState,
@@ -180,14 +181,27 @@ struct RemoteChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            RemoteChatHeaderView(
+                thread: thread,
+                isPlanModeActive: isPlanModeActive,
+                isHeaderHovered: $isHeaderHovered,
+                onExit: viewModel.exitChat,
+                onInterrupt: interrupt
+            )
 
             if isOpeningThread {
-                loadingState
+                RemoteChatLoadingStateView()
             } else if history.isEmpty {
-                emptyState
+                RemoteChatEmptyStateView()
             } else {
-                messageList
+                RemoteChatMessageListView(
+                    history: history,
+                    logicalSessionId: thread.logicalSessionId,
+                    shouldScrollToBottom: $shouldScrollToBottom,
+                    isAutoscrollPaused: isAutoscrollPaused,
+                    newMessageCount: newMessageCount,
+                    onResumeAutoscroll: resumeAutoscroll
+                )
             }
 
             if let pendingInteraction {
@@ -205,7 +219,27 @@ struct RemoteChatView: View {
                 )
                 .id(pendingInteraction.id)
             } else {
-                composer
+                RemoteChatComposerView(
+                    thread: thread,
+                    isPlanModeActive: isPlanModeActive,
+                    inputText: $inputText,
+                    isInputFocused: $isInputFocused,
+                    activeSlashPanel: $activeSlashPanel,
+                    slashFeedbackMessage: $slashFeedbackMessage,
+                    isSlashPanelLoading: isSlashPanelLoading,
+                    isExecutingSlashAction: isExecutingSlashAction,
+                    availableModels: availableModels,
+                    selectedModelForEffort: $selectedModelForEffort,
+                    resumeCandidates: resumeCandidates,
+                    matchingSlashCommands: matchingSlashCommands,
+                    inputPrompt: inputPrompt,
+                    onSubmit: handleSubmit,
+                    onHandleSlashCommand: handleSlashCommand,
+                    onDismissSlashPanel: dismissSlashPanel,
+                    onApplyModelSelection: applyModelSelection,
+                    onApplyPermissionPreset: applyPermissionPreset,
+                    onResumeRemoteThread: resumeRemoteThread
+                )
             }
         }
         .task {
@@ -253,558 +287,6 @@ struct RemoteChatView: View {
                 slashFeedbackMessage = nil
             }
         }
-    }
-
-    @State private var isHeaderHovered = false
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Button {
-                viewModel.exitChat()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.6))
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.plain)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(thread.displayTitle)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.9))
-                        .lineLimit(1)
-
-                    if isPlanModeActive {
-                        Text("PLAN MODE")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black.opacity(0.9))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(TerminalColors.amber.opacity(0.95))
-                            .clipShape(Capsule())
-                    }
-                }
-
-                Text(thread.sourceDetail)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.white.opacity(0.35))
-                    .lineLimit(1)
-
-                SessionStatusStrip(
-                    model: thread.currentModel,
-                    reasoningEffort: thread.currentReasoningEffort?.rawValue,
-                    serviceTier: thread.turnContext.serviceTier?.rawValue,
-                    contextRemainingPercent: thread.contextRemainingPercent
-                )
-            }
-
-            Spacer()
-
-            if thread.canInterrupt {
-                Button {
-                    interrupt()
-                } label: {
-                    Image(systemName: "stop.circle")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.white.opacity(0.6))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(0.2))
-        .onHover { isHeaderHovered = $0 }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 24))
-                .foregroundColor(.white.opacity(0.2))
-            Text("No thread history yet")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(.white.opacity(0.4))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var loadingState: some View {
-        VStack(spacing: 8) {
-            ProgressView()
-                .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.4)))
-                .scaleEffect(0.8)
-            Text("Opening remote session...")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(.white.opacity(0.4))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private let fadeColor = Color.black
-
-    private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 16) {
-                    Color.clear
-                        .frame(height: 1)
-                        .id("bottom")
-
-                    ForEach(history.reversed()) { item in
-                        MessageItemView(item: item, sessionId: thread.logicalSessionId)
-                            .padding(.horizontal, 16)
-                            .scaleEffect(x: 1, y: -1)
-                    }
-                }
-                .padding(.top, 20)
-                .padding(.bottom, 20)
-            }
-            .scaleEffect(x: 1, y: -1)
-            .onChange(of: shouldScrollToBottom) { _, shouldScroll in
-                if shouldScroll {
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
-                    shouldScrollToBottom = false
-                    resumeAutoscroll()
-                }
-            }
-            .overlay(alignment: .bottom) {
-                if isAutoscrollPaused && newMessageCount > 0 {
-                    NewMessagesIndicator(count: newMessageCount) {
-                        withAnimation(.easeOut(duration: 0.3)) {
-                            proxy.scrollTo("bottom", anchor: .bottom)
-                        }
-                        resumeAutoscroll()
-                    }
-                    .padding(.bottom, 16)
-                }
-            }
-        }
-    }
-
-    private var composer: some View {
-        VStack(spacing: 8) {
-            if isPlanModeActive {
-                planModeBanner
-            }
-
-            if let connectionMessage = thread.connectionFeedbackMessage {
-                slashFeedbackBanner(message: connectionMessage)
-            }
-
-            if let activeSlashPanel {
-                slashPanel(activeSlashPanel)
-            } else if !matchingSlashCommands.isEmpty {
-                slashSuggestionsPanel
-            }
-
-            if let slashFeedbackMessage, !slashFeedbackMessage.isEmpty {
-                slashFeedbackBanner(message: slashFeedbackMessage)
-            }
-
-            inputBar
-        }
-    }
-
-    private var planModeBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "list.bullet.clipboard")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(TerminalColors.amber)
-
-            Text("Plan Mode active. `/plan` again will switch back to Default mode.")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.72))
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.06))
-        )
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-    }
-
-    private var inputBar: some View {
-        HStack(spacing: 10) {
-            TextField(inputPrompt, text: $inputText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .foregroundColor(thread.canSendMessage ? .white : .white.opacity(0.4))
-                .focused($isInputFocused)
-                .disabled(!thread.canSendMessage)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 20)
-                        .fill(Color.white.opacity(thread.canSendMessage ? 0.08 : 0.04))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 20)
-                                .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
-                        )
-                )
-                .onSubmit {
-                    handleSubmit()
-                }
-
-            Button {
-                handleSubmit()
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(!thread.canSendMessage || inputText.isEmpty ? .white.opacity(0.2) : .white.opacity(0.9))
-            }
-            .buttonStyle(.plain)
-            .disabled(!thread.canSendMessage || inputText.isEmpty)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color.black.opacity(0.2))
-        .overlay(alignment: .top) {
-            LinearGradient(
-                colors: [fadeColor.opacity(0), fadeColor.opacity(0.7)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 24)
-            .offset(y: -24)
-            .allowsHitTesting(false)
-        }
-    }
-
-    private var slashSuggestionsPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Remote commands")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.white.opacity(0.7))
-
-            ForEach(matchingSlashCommands) { command in
-                Button {
-                    handleSlashCommand(command, args: nil)
-                } label: {
-                    HStack(spacing: 10) {
-                        Text(command.title)
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.9))
-                        Text(command.description)
-                            .font(.system(size: 11))
-                            .foregroundColor(.white.opacity(0.45))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.white.opacity(0.05))
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-    }
-
-    private func slashFeedbackBanner(message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 10))
-                .foregroundColor(TerminalColors.amber)
-
-            Text(message)
-                .font(.system(size: 11))
-                .foregroundColor(.white.opacity(0.7))
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.06))
-        )
-        .padding(.horizontal, 16)
-    }
-
-    @ViewBuilder
-    private func slashPanel(_ panel: RemoteSlashPanel) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(title(for: panel))
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.92))
-                Text(subtitle(for: panel))
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.45))
-                Spacer()
-                Button {
-                    dismissSlashPanel()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.35))
-                }
-                .buttonStyle(.plain)
-            }
-
-            if isSlashPanelLoading {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Loading…")
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.55))
-                }
-                .padding(.vertical, 8)
-            } else {
-                switch panel {
-                case .model:
-                    modelPanelContent
-                case .permissions:
-                    permissionsPanelContent
-                case .resume:
-                    resumePanelContent
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
-    }
-
-    private var modelPanelContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let selectedModelForEffort {
-                Text("Choose reasoning effort for \(selectedModelForEffort.displayName)")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.45))
-
-                ForEach(selectedModelForEffort.supportedReasoningEfforts, id: \.reasoningEffort) { option in
-                    slashActionButton(
-                        option.reasoningEffort.rawValue,
-                        note: option.description
-                    ) {
-                        await applyModelSelection(
-                            model: selectedModelForEffort,
-                            effort: option.reasoningEffort
-                        )
-                    }
-                }
-
-                slashActionButton("Use default", note: selectedModelForEffort.defaultReasoningEffort.rawValue) {
-                    await applyModelSelection(
-                        model: selectedModelForEffort,
-                        effort: selectedModelForEffort.defaultReasoningEffort
-                    )
-                }
-
-                Button("Back") {
-                    self.selectedModelForEffort = nil
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white.opacity(0.55))
-                .padding(.top, 4)
-            } else if availableModels.isEmpty {
-                Text("No models available")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.45))
-            } else {
-                ForEach(availableModels, id: \.id) { model in
-                    let isCurrent = model.model == (thread.currentModel ?? thread.turnContext.model)
-                    Button {
-                        if model.supportedReasoningEfforts.count <= 1 {
-                            Task {
-                                await applyModelSelection(
-                                    model: model,
-                                    effort: model.defaultReasoningEffort
-                                )
-                            }
-                        } else {
-                            selectedModelForEffort = model
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(model.displayName)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.88))
-                                if isCurrent {
-                                    Text("Current")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundColor(.black)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.white.opacity(0.85))
-                                        .clipShape(Capsule())
-                                }
-                                Spacer()
-                                Text(model.defaultReasoningEffort.rawValue)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.white.opacity(0.35))
-                            }
-                            Text(model.description)
-                                .font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.4))
-                                .lineLimit(2)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color.white.opacity(0.05))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isExecutingSlashAction)
-                }
-            }
-        }
-    }
-
-    private var permissionsPanelContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(RemoteApprovalPreset.builtIn) { preset in
-                let isCurrent = thread.turnContext.approvalPolicy == preset.approvalPolicy &&
-                    thread.turnContext.sandboxPolicy == preset.sandboxPolicy
-                Button {
-                    Task {
-                        await applyPermissionPreset(preset)
-                    }
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Text(preset.label)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.white.opacity(0.88))
-                            if isCurrent {
-                                Text("Current")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundColor(.black)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.white.opacity(0.85))
-                                    .clipShape(Capsule())
-                            }
-                            Spacer()
-                        }
-                        Text(preset.description)
-                            .font(.system(size: 10))
-                            .foregroundColor(.white.opacity(0.4))
-                            .lineLimit(3)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.white.opacity(0.05))
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(isExecutingSlashAction)
-            }
-        }
-    }
-
-    private var resumePanelContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if resumeCandidates.isEmpty {
-                Text("No other remote threads available on this host")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.45))
-            } else {
-                ForEach(resumeCandidates) { candidate in
-                    Button {
-                        Task {
-                            await resumeRemoteThread(candidate)
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(candidate.displayTitle)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.88))
-                                    .lineLimit(1)
-                                Spacer()
-                                Text(candidate.updatedAt.formatted(date: .omitted, time: .shortened))
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.white.opacity(0.35))
-                            }
-                            Text(candidate.sourceDetail)
-                                .font(.system(size: 10))
-                                .foregroundColor(.white.opacity(0.4))
-                                .lineLimit(1)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color.white.opacity(0.05))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isExecutingSlashAction)
-                }
-            }
-        }
-    }
-
-    private func title(for panel: RemoteSlashPanel) -> String {
-        switch panel {
-        case .model:
-            return "/model"
-        case .permissions:
-            return "/permissions"
-        case .resume:
-            return "/resume"
-        }
-    }
-
-    private func subtitle(for panel: RemoteSlashPanel) -> String {
-        switch panel {
-        case .model:
-            return "Choose what model and reasoning effort to use."
-        case .permissions:
-            return "Choose what Codex is allowed to do."
-        case .resume:
-            return "Resume a saved chat."
-        }
-    }
-
-    private func slashActionButton(
-        _ title: String,
-        note: String,
-        action: @escaping () async -> Void
-    ) -> some View {
-        Button {
-            Task {
-                await action()
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.white.opacity(0.88))
-                Text(note)
-                    .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.4))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.white.opacity(0.05))
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(isExecutingSlashAction)
     }
 
     private var inputPrompt: String {
