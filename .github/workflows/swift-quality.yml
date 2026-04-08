@@ -15,16 +15,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
       - name: Install toolchain helpers
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
         run: brew install swiftformat swiftlint
 
       - name: Run Swift quality baseline
         run: ./scripts/swift-quality.sh --all
 
       - name: Build Debug app
-        run: xcodebuild -scheme CodexIsland -configuration Debug build
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/DerivedData
+        run: xcodebuild -project CodexIsland.xcodeproj -scheme CodexIsland -configuration Debug -derivedDataPath "$DERIVED_DATA_PATH" SWIFT_ENABLE_EXPLICIT_MODULES=NO build
 
       - name: Run tests
-        run: xcodebuild test -scheme CodexIsland -destination 'platform=macOS'
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/DerivedData
+        run: xcodebuild test -project CodexIsland.xcodeproj -scheme CodexIsland -derivedDataPath "$DERIVED_DATA_PATH" SWIFT_ENABLE_EXPLICIT_MODULES=NO -destination 'platform=macOS'

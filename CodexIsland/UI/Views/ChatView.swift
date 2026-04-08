@@ -196,6 +196,16 @@ struct ChatView: View {
         localAppServerThread?.turnContext.collaborationMode?.mode == .plan
     }
 
+    private var shouldShowDebugConversationID: Bool {
+        AppSettings.remoteDiagnosticsLoggingEnabled
+    }
+
+    private var debugConversationID: String {
+        let candidate = localAppServerThread?.threadId ?? session.sessionId
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? session.sessionId : trimmed
+    }
+
     private var trimmedInputText: String {
         inputText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -395,6 +405,13 @@ struct ChatView: View {
                         serviceTier: nil,
                         contextRemainingPercent: session.contextRemainingPercent
                     )
+
+                    if shouldShowDebugConversationID {
+                        DebugConversationIDView(
+                            label: "Session ID",
+                            value: debugConversationID
+                        )
+                    }
                 }
 
                 Spacer()

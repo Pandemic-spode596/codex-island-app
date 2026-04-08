@@ -57,13 +57,14 @@ Codex Island is a macOS notch and menu bar companion for Codex CLI. It keeps loc
 - Includes launch-at-login, screen selection, sound settings, and in-app updates.
 - Falls back gracefully on Macs without a physical notch.
 
-## What's New in 0.0.4
+## What's New in 0.0.5
 
-- Hardens remote `codex app-server` session handling with better reconnect behavior, fallback diagnostics, and remote thread selection logging.
-- Adds SSH config-based host suggestions for the `SSH Target` field while keeping direct `user@host` input unchanged.
-- Makes hook installation, socket processing, transcript watchers, and JSONL readers report explicit failure reasons instead of silently dropping errors.
-- Refactors chat, parser, session-store, and tool-result code into smaller focused components to reduce maintenance risk.
-- Strengthens the repository release path with staged Swift quality checks, CI build coverage, heuristic audit calibration, and unsigned release fallback packaging.
+- Chat history now renders image attachments for both local and remote conversations.
+- Remote thinking history filters out empty items so transcript playback is cleaner.
+- Hook installation is safer: enabling hooks preserves `config.toml` formatting and avoids incorrect rewrites.
+- Local session teardown and notch session matching are more precise, reducing stale state and false-positive local sessions.
+- When `Remote Debug Logs` is enabled, chat headers now show a copyable session/thread identifier for diagnostics.
+- The GitHub Actions Swift quality workflow now pins a stable Xcode selection and uses an isolated DerivedData path for build and test runs.
 
 ## Requirements
 

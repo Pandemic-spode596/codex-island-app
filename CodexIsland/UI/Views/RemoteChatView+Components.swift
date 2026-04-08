@@ -14,6 +14,10 @@ struct RemoteChatHeaderView: View {
     let onExit: () -> Void
     let onInterrupt: () -> Void
 
+    private var shouldShowDebugConversationID: Bool {
+        AppSettings.remoteDiagnosticsLoggingEnabled
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Button(action: onExit) {
@@ -53,6 +57,13 @@ struct RemoteChatHeaderView: View {
                     serviceTier: thread.turnContext.serviceTier?.rawValue,
                     contextRemainingPercent: thread.contextRemainingPercent
                 )
+
+                if shouldShowDebugConversationID {
+                    DebugConversationIDView(
+                        label: "Thread ID",
+                        value: thread.threadId
+                    )
+                }
             }
 
             Spacer()
