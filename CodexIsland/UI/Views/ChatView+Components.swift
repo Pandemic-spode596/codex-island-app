@@ -6,6 +6,7 @@
 //
 
 import Combine
+import AppKit
 import SwiftUI
 
 // MARK: - Message Item View
@@ -20,6 +21,10 @@ struct MessageItemView: View {
             UserMessageView(text: text)
         case .assistant(let text):
             AssistantMessageView(text: text)
+        case .userImage(let attachment):
+            UserImageMessageView(attachment: attachment)
+        case .assistantImage(let attachment):
+            AssistantImageMessageView(attachment: attachment)
         case .toolCall(let tool):
             ToolCallView(tool: tool, sessionId: sessionId)
         case .thinking(let text):
@@ -66,6 +71,105 @@ struct AssistantMessageView: View {
 
             Spacer(minLength: 60)
         }
+    }
+}
+
+struct UserImageMessageView: View {
+    let attachment: ChatImageAttachment
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: 60)
+
+            ChatAttachmentImageView(attachment: attachment)
+        }
+    }
+}
+
+struct AssistantImageMessageView: View {
+    let attachment: ChatImageAttachment
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Circle()
+                .fill(Color.white.opacity(0.6))
+                .frame(width: 6, height: 6)
+                .padding(.top, 5)
+
+            ChatAttachmentImageView(attachment: attachment)
+
+            Spacer(minLength: 60)
+        }
+    }
+}
+
+struct ChatAttachmentImageView: View {
+    let attachment: ChatImageAttachment
+
+    private let maxWidth: CGFloat = 220
+    private let maxHeight: CGFloat = 160
+
+    var body: some View {
+        Group {
+            switch attachment.source {
+            case .remoteURL(let value):
+                if let url = URL(string: value) {
+                    AsyncImage(url: url) { phase in
+                        imageContent(for: phase.image)
+                    }
+                } else {
+                    placeholder
+                }
+            case .localPath(let path):
+                imageContent(for: NSImage(contentsOfFile: (path as NSString).expandingTildeInPath).map(Image.init(nsImage:)))
+            case .dataURL(let value):
+                imageContent(for: decodeDataURL(value).map(Image.init(nsImage:)))
+            }
+        }
+        .frame(maxWidth: maxWidth, maxHeight: maxHeight, alignment: .leading)
+        .accessibilityLabel(attachment.accessibilityLabel)
+    }
+
+    @ViewBuilder
+    private func imageContent(for image: Image?) -> some View {
+        if let image {
+            image
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: maxWidth, maxHeight: maxHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        } else {
+            placeholder
+        }
+    }
+
+    private var placeholder: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color.white.opacity(0.08))
+            .frame(width: 160, height: 110)
+            .overlay {
+                VStack(spacing: 6) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.white.opacity(0.45))
+                    Text("Image unavailable")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+            }
+    }
+
+    private func decodeDataURL(_ value: String) -> NSImage? {
+        guard let commaIndex = value.firstIndex(of: ",") else { return nil }
+        let payload = String(value[value.index(after: commaIndex)...])
+        guard let data = Data(base64Encoded: payload, options: [.ignoreUnknownCharacters]) else {
+            return nil
+        }
+        return NSImage(data: data)
     }
 }
 

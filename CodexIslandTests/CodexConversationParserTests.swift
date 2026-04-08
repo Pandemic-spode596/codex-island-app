@@ -132,6 +132,32 @@ final class CodexConversationParserTests: XCTestCase {
         XCTAssertEqual(interaction.questions.first?.question, "要执行这份报告，还是继续留在 Plan 模式里提问？")
     }
 
+    func testMessageContentParsesImageAttachmentAndStripsImageTagsFromText() async throws {
+        let transcript = #"""
+        {"timestamp":"2026-04-08T06:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1]></image>\n请看这张图，[Image #1] 这里有问题。"},{"type":"input_image","image_url":"https://example.com/image.png","name":"debug screenshot"}]}}
+        """#
+
+        let messages = try await parsedMessages(from: transcript)
+        let history = try await parsedHistory(from: transcript)
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].textContent, "请看这张图，这里有问题。")
+
+        guard history.count == 2 else {
+            return XCTFail("Expected text + image history items")
+        }
+        guard case .user(let text) = history[0].type else {
+            return XCTFail("Expected first history item to be user text")
+        }
+        XCTAssertEqual(text, "请看这张图，这里有问题。")
+
+        guard case .userImage(let attachment) = history[1].type else {
+            return XCTFail("Expected second history item to be user image")
+        }
+        XCTAssertEqual(attachment.source, .remoteURL("https://example.com/image.png"))
+        XCTAssertEqual(attachment.label, "debug screenshot")
+    }
+
     // 每个用例都写独立 rollout.jsonl，尽量贴近真实 transcript 文件读取路径。
     private func makeTranscriptFile(contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -178,6 +204,14 @@ final class CodexConversationParserTests: XCTestCase {
             sessionId: sessionId,
             transcriptPath: url.path
         )
+    }
+
+    private func parsedHistory(from transcript: String) async throws -> [ChatHistoryItem] {
+        let snapshot = await CodexConversationParser.shared.parseContent(
+            sessionId: sessionId,
+            content: transcript
+        )
+        return snapshot.history
     }
 
     private func assertPlanFollowupInteraction(

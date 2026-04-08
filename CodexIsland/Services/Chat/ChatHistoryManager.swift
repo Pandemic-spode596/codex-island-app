@@ -192,7 +192,7 @@ class ChatHistoryManager: ObservableObject {
         switch item.type {
         case .user(let text), .assistant(let text):
             return isCodexInjectedText(text)
-        case .toolCall, .thinking, .interrupted:
+        case .userImage, .assistantImage, .toolCall, .thinking, .interrupted:
             return false
         }
     }
@@ -226,6 +226,8 @@ nonisolated struct ChatHistoryItem: Identifiable, Equatable, Sendable {
 nonisolated enum ChatHistoryItemType: Equatable, Sendable {
     case user(String)
     case assistant(String)
+    case userImage(ChatImageAttachment)
+    case assistantImage(ChatImageAttachment)
     case toolCall(ToolCallItem)
     case thinking(String)
     case interrupted

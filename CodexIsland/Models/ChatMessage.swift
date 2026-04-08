@@ -28,6 +28,29 @@ struct ChatMessage: Identifiable, Equatable {
     }
 }
 
+nonisolated struct ChatImageAttachment: Equatable, Sendable {
+    enum Source: Equatable, Sendable {
+        case remoteURL(String)
+        case localPath(String)
+        case dataURL(String)
+    }
+
+    let source: Source
+    let label: String?
+
+    nonisolated var stableIdentifier: String {
+        switch source {
+        case .remoteURL(let value), .localPath(let value), .dataURL(let value):
+            return value
+        }
+    }
+
+    nonisolated var accessibilityLabel: String {
+        let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false ? trimmed : nil) ?? "Attached image"
+    }
+}
+
 enum ChatRole: String, Equatable {
     case user
     case assistant
@@ -36,6 +59,7 @@ enum ChatRole: String, Equatable {
 
 enum MessageBlock: Equatable, Identifiable {
     case text(String)
+    case image(ChatImageAttachment)
     case toolUse(ToolUseBlock)
     case thinking(String)
     case interrupted
@@ -44,6 +68,8 @@ enum MessageBlock: Equatable, Identifiable {
         switch self {
         case .text(let text):
             return "text-\(text.prefix(20).hashValue)"
+        case .image(let attachment):
+            return "image-\(attachment.stableIdentifier.hashValue)"
         case .toolUse(let block):
             return "tool-\(block.id)"
         case .thinking(let text):
@@ -57,6 +83,7 @@ enum MessageBlock: Equatable, Identifiable {
     nonisolated var typePrefix: String {
         switch self {
         case .text: return "text"
+        case .image: return "image"
         case .toolUse: return "tool"
         case .thinking: return "thinking"
         case .interrupted: return "interrupted"

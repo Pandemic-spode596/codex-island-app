@@ -913,6 +913,10 @@ final class RemoteSessionMonitor: ObservableObject {
                         return "user:\(item.id)"
                     case .assistant:
                         return "assistant:\(item.id)"
+                    case .userImage:
+                        return "userImage:\(item.id)"
+                    case .assistantImage:
+                        return "assistantImage:\(item.id)"
                     case .thinking:
                         return "thinking:\(item.id)"
                     case .toolCall(let tool):
@@ -1867,12 +1871,25 @@ final class RemoteSessionMonitor: ObservableObject {
                     threads[index].lastMessage = text
                     threads[index].lastMessageRole = "assistant"
                 }
+            case .assistantImage:
+                if threads[index].lastMessage == nil {
+                    threads[index].lastMessage = "Image"
+                    threads[index].lastMessageRole = "assistant"
+                }
             case .user(let text):
                 if threads[index].lastUserMessageDate == nil {
                     threads[index].lastUserMessageDate = item.timestamp
                 }
                 if threads[index].lastMessage == nil {
                     threads[index].lastMessage = text
+                    threads[index].lastMessageRole = "user"
+                }
+            case .userImage:
+                if threads[index].lastUserMessageDate == nil {
+                    threads[index].lastUserMessageDate = item.timestamp
+                }
+                if threads[index].lastMessage == nil {
+                    threads[index].lastMessage = "Image"
                     threads[index].lastMessageRole = "user"
                 }
             case .toolCall(let tool):
@@ -1963,18 +1980,22 @@ final class RemoteSessionMonitor: ObservableObject {
     }
 
     private func upsertHistoryItem(_ item: RemoteAppServerThreadItem, threadIndex: Int, isCompletion: Bool) {
-        guard let chatItem = RemoteThreadHistoryMapper.chatHistoryItem(from: item) else { return }
-        if case .userMessage = item {
-            mergeOptimisticUserMessageIfNeeded(item: chatItem, threadIndex: threadIndex)
-        }
-        if let existing = threads[threadIndex].history.firstIndex(where: { $0.id == chatItem.id }) {
-            threads[threadIndex].history[existing] = ChatHistoryItem(
-                id: chatItem.id,
-                type: chatItem.type,
-                timestamp: threads[threadIndex].history[existing].timestamp
-            )
-        } else {
-            threads[threadIndex].history.append(chatItem)
+        let chatItems = RemoteThreadHistoryMapper.chatHistoryItems(from: item)
+        guard !chatItems.isEmpty else { return }
+
+        for chatItem in chatItems {
+            if case .userMessage = item {
+                mergeOptimisticUserMessageIfNeeded(item: chatItem, threadIndex: threadIndex)
+            }
+            if let existing = threads[threadIndex].history.firstIndex(where: { $0.id == chatItem.id }) {
+                threads[threadIndex].history[existing] = ChatHistoryItem(
+                    id: chatItem.id,
+                    type: chatItem.type,
+                    timestamp: threads[threadIndex].history[existing].timestamp
+                )
+            } else {
+                threads[threadIndex].history.append(chatItem)
+            }
         }
 
         if isCompletion {

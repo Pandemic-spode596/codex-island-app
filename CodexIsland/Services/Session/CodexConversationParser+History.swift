@@ -23,6 +23,10 @@ extension CodexConversationParser {
                     let itemId = "\(message.id)-text-\(blockIndex)"
                     let itemType: ChatHistoryItemType = message.role == .user ? .user(text) : .assistant(text)
                     items.append(ChatHistoryItem(id: itemId, type: itemType, timestamp: message.timestamp))
+                case .image(let attachment):
+                    let itemId = "\(message.id)-image-\(blockIndex)"
+                    let itemType: ChatHistoryItemType = message.role == .user ? .userImage(attachment) : .assistantImage(attachment)
+                    items.append(ChatHistoryItem(id: itemId, type: itemType, timestamp: message.timestamp))
                 case .thinking(let text):
                     let itemId = "\(message.id)-thinking-\(blockIndex)"
                     items.append(ChatHistoryItem(id: itemId, type: .thinking(text), timestamp: message.timestamp))
@@ -73,7 +77,7 @@ extension CodexConversationParser {
                     switch block {
                     case .text(let text), .thinking(let text):
                         return text
-                    case .toolUse, .interrupted:
+                    case .image, .toolUse, .interrupted:
                         return nil
                     }
                 }.joined(separator: "\n")

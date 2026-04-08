@@ -20,6 +20,10 @@ extension CodexConversationParser {
                 containsProposedPlan = containsProposedPlan || normalized.containsProposedPlan
                 guard !normalized.text.isEmpty else { return nil }
                 return .text(normalized.text)
+            case "input_image", "output_image", "image":
+                return parseImageAttachment(item).map(MessageBlock.image)
+            case "local_image":
+                return parseLocalImageAttachment(item).map(MessageBlock.image)
             default:
                 return nil
             }
@@ -29,12 +33,62 @@ extension CodexConversationParser {
 
     func normalizeMessageText(_ text: String) -> (text: String, containsProposedPlan: Bool) {
         let containsProposedPlan = text.contains("<proposed_plan>") || text.contains("</proposed_plan>")
-        guard containsProposedPlan else { return (text, false) }
-        let normalized = text
+        let strippedImageTags = stripImageTagMarkup(from: text)
+        let normalized = strippedImageTags
             .replacingOccurrences(of: "<proposed_plan>", with: "")
             .replacingOccurrences(of: "</proposed_plan>", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (normalized, true)
+        return (normalized, containsProposedPlan)
+    }
+
+    func parseImageAttachment(_ item: [String: Any]) -> ChatImageAttachment? {
+        let label = item["name"] as? String ?? item["alt"] as? String ?? item["label"] as? String
+        if let imageURL = item["image_url"] as? String, !imageURL.isEmpty {
+            let source: ChatImageAttachment.Source = imageURL.hasPrefix("data:image/")
+                ? .dataURL(imageURL)
+                : .remoteURL(imageURL)
+            return ChatImageAttachment(source: source, label: label)
+        }
+        if let url = item["url"] as? String, !url.isEmpty {
+            let source: ChatImageAttachment.Source = url.hasPrefix("data:image/")
+                ? .dataURL(url)
+                : .remoteURL(url)
+            return ChatImageAttachment(source: source, label: label)
+        }
+        return nil
+    }
+
+    func parseLocalImageAttachment(_ item: [String: Any]) -> ChatImageAttachment? {
+        let label = item["name"] as? String ?? item["alt"] as? String ?? item["label"] as? String
+        if let path = item["path"] as? String, !path.isEmpty {
+            return ChatImageAttachment(source: .localPath(path), label: label)
+        }
+        return parseImageAttachment(item)
+    }
+
+    func stripImageTagMarkup(from text: String) -> String {
+        let patterns = [
+            #"<image\b[^>]*>.*?</image>"#,
+            #"</?image\b[^>]*>"#,
+            #"\s*\[Image #\d+\]\s*"#
+        ]
+
+        var sanitized = text
+        for pattern in patterns {
+            sanitized = replacingMatches(in: sanitized, pattern: pattern, template: "")
+        }
+
+        sanitized = replacingMatches(in: sanitized, pattern: #"\n{3,}"#, template: "\n\n")
+        sanitized = replacingMatches(in: sanitized, pattern: #"[ \t]{2,}"#, template: " ")
+        return sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func replacingMatches(in text: String, pattern: String, template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return text
+        }
+        let range = NSRange(text.startIndex ..< text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
     }
 
     func makeProposedPlanFollowupInteraction(lineIndex: Int) -> PendingUserInputInteraction {

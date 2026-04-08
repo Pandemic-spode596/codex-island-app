@@ -140,6 +140,11 @@ extension SessionStore {
             let itemId = "\(message.id)-text-\(blockIndex)"
             guard !existingIds.contains(itemId) else { return nil }
             return ChatHistoryItem(id: itemId, type: message.role == .user ? .user(text) : .assistant(text), timestamp: message.timestamp)
+        case .image(let attachment):
+            let itemId = "\(message.id)-image-\(blockIndex)"
+            guard !existingIds.contains(itemId) else { return nil }
+            let type: ChatHistoryItemType = message.role == .user ? .userImage(attachment) : .assistantImage(attachment)
+            return ChatHistoryItem(id: itemId, type: type, timestamp: message.timestamp)
         case .toolUse(let tool):
             guard toolTracker.markSeen(tool.id) else { return nil }
             let resultText = completedToolResultText(tool.id, completedTools: completedTools, toolResults: toolResults)
@@ -298,7 +303,7 @@ extension SessionStore {
                 switch block {
                 case .toolUse(let tool):
                     validIds.insert(tool.id)
-                case .text, .thinking, .interrupted:
+                case .text, .image, .thinking, .interrupted:
                     validIds.insert("\(message.id)-\(block.typePrefix)-\(blockIndex)")
                 }
             }
