@@ -364,8 +364,9 @@ class CodexSessionMonitor: ObservableObject {
 
     /// Archive (remove) a session from the instances list
     func archiveSession(sessionId: String) {
-        if !latestStoreSessions.contains(where: { $0.sessionId == sessionId }),
-           threadForSessionId(sessionId) != nil {
+        let hasBackedStoreSession = latestStoreSessions.contains { $0.sessionId == sessionId }
+        let hasVisibleSyntheticSession = instances.contains { $0.sessionId == sessionId }
+        if !hasBackedStoreSession, hasVisibleSyntheticSession {
             dismissedSyntheticSessionIds.insert(sessionId)
             updateFromSessions(latestStoreSessions)
             return

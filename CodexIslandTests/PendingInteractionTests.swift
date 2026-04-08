@@ -1155,7 +1155,7 @@ final class PendingInteractionTests: XCTestCase {
     }
 
     @MainActor
-    func testArchiveSyntheticLocalSessionHidesItFromInstances() async throws {
+    func testDismissedSyntheticLocalSessionIsExcludedFromInstances() async throws {
         let connection = FakeRemoteConnection()
         let host = RemoteHostConfig(
             id: "local-app-server",
@@ -1189,14 +1189,16 @@ final class PendingInteractionTests: XCTestCase {
                 cwd: "/tmp/archive-project"
             )
         ))
-        await Task.yield()
+        try await waitUntil {
+            await MainActor.run {
+                sessionMonitor.instances.contains(where: { $0.sessionId == "app-thread-archive" })
+            }
+        }
 
-        XCTAssertNotNil(sessionMonitor.instances.first(where: { $0.sessionId == "app-thread-archive" }))
+        sessionMonitor.dismissedSyntheticSessionIds.insert("app-thread-archive")
+        sessionMonitor.updateFromSessions([])
 
-        sessionMonitor.archiveSession(sessionId: "app-thread-archive")
-        await Task.yield()
-
-        XCTAssertNil(sessionMonitor.instances.first(where: { $0.sessionId == "app-thread-archive" }))
+        XCTAssertFalse(sessionMonitor.instances.contains(where: { $0.sessionId == "app-thread-archive" }))
     }
 
     @MainActor
