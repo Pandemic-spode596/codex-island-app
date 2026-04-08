@@ -18,7 +18,7 @@ jobs:
       - name: Install toolchain helpers
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
-        run: brew install swiftformat swiftlint xcpretty
+        run: brew install swiftformat swiftlint
 
       - name: Run Swift quality baseline
         run: ./scripts/swift-quality.sh --all
