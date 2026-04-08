@@ -35,6 +35,8 @@ class CodexSessionMonitor: ObservableObject {
     let localAppServerMonitor: RemoteSessionMonitor
     let canSendTerminalInput: @Sendable (SessionState) -> Bool
     let sendTerminalInput: @Sendable (String, SessionState) async -> Bool
+    let processExistsHandler: @Sendable (Int) -> Bool
+    let stopExitCheckDelay: Duration
     var latestStoreSessions: [SessionState] = []
     var pendingLocalThreadLoads: Set<String> = []
     var dismissedSyntheticSessionIds: Set<String> = []
@@ -49,11 +51,20 @@ class CodexSessionMonitor: ObservableObject {
                 steps: [.text(text), .enter],
                 to: session
             )
-        }
+        },
+        processExistsHandler: @escaping @Sendable (Int) -> Bool = { pid in
+            if kill(pid_t(pid), 0) == 0 {
+                return true
+            }
+            return errno != ESRCH
+        },
+        stopExitCheckDelay: Duration = .milliseconds(250)
     ) {
         self.localAppServerMonitor = localAppServerMonitor ?? Self.makeLocalAppServerMonitor()
         self.canSendTerminalInput = canSendTerminalInput
         self.sendTerminalInput = sendTerminalInput
+        self.processExistsHandler = processExistsHandler
+        self.stopExitCheckDelay = stopExitCheckDelay
 
         SessionStore.shared.sessionsPublisher
             .receive(on: DispatchQueue.main)
@@ -108,6 +119,9 @@ class CodexSessionMonitor: ObservableObject {
 
                 if event.event == "Stop" {
                     HookSocketServer.shared.cancelPendingPermissions(sessionId: event.sessionId)
+                    Task { @MainActor [weak self] in
+                        await self?.schedulePostStopExitCheck(for: event)
+                    }
                 }
 
                 if event.event == "PostToolUse", let toolUseId = event.toolUseId {

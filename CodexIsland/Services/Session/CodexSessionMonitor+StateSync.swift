@@ -169,6 +169,29 @@ extension CodexSessionMonitor {
         await SessionStore.shared.process(.codexProcessExited(sessionId: session.sessionId))
     }
 
+    func schedulePostStopExitCheck(for event: HookEvent) async {
+        guard event.provider == .codex,
+              event.event == "Stop",
+              let pid = event.pid else {
+            return
+        }
+
+        do {
+            try await Task.sleep(for: stopExitCheckDelay)
+        } catch {
+            return
+        }
+
+        guard let session = await SessionStore.shared.session(for: event.sessionId),
+              session.provider == .codex,
+              session.pid == pid,
+              !processExists(pid: pid) else {
+            return
+        }
+
+        await handleCodexProcessExit(for: session)
+    }
+
     func monitorCodexProcessLiveness() async {
         while !Task.isCancelled {
             let sessions = await SessionStore.shared.allSessions()
@@ -188,9 +211,6 @@ extension CodexSessionMonitor {
     }
 
     nonisolated func processExists(pid: Int) -> Bool {
-        if kill(pid_t(pid), 0) == 0 {
-            return true
-        }
-        return errno != ESRCH
+        processExistsHandler(pid)
     }
 }

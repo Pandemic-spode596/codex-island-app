@@ -1202,6 +1202,84 @@ final class PendingInteractionTests: XCTestCase {
     }
 
     @MainActor
+    func testLocalStopHookRemovesSessionWithoutWaitingForLivenessPoll() async throws {
+        let harness = makeLocalAppServerHarness(
+            canSendTerminalInput: { _ in false },
+            sendTerminalInput: { _, _ in false },
+            processExistsHandler: { _ in false },
+            stopExitCheckDelay: .milliseconds(10)
+        )
+
+        harness.localMonitor.startMonitoring()
+        await SessionStore.shared.process(.hookReceived(HookEvent(
+            sessionId: "session-stop-fast",
+            provider: .codex,
+            cwd: "/tmp/stop-project",
+            transcriptPath: "/tmp/stop-project/rollout.jsonl",
+            event: "SessionStart",
+            status: "waiting_for_input",
+            pid: 123,
+            tty: "/dev/ttys009",
+            terminalName: "Apple_Terminal",
+            terminalWindowId: nil,
+            terminalTabId: nil,
+            terminalSurfaceId: nil,
+            turnId: nil,
+            tool: nil,
+            toolInput: nil,
+            toolUseId: nil,
+            notificationType: nil,
+            message: nil
+        )))
+        await Task.yield()
+
+        harness.localMonitor.apply(event: .threadUpsert(
+            hostId: harness.host.id,
+            thread: makeThread(
+                id: "session-stop-fast",
+                preview: "Stopping Thread",
+                status: .idle,
+                cwd: "/tmp/stop-project",
+                path: "/tmp/stop-project/rollout.jsonl"
+            )
+        ))
+        try await waitUntil {
+            await MainActor.run {
+                harness.sessionMonitor.instances.contains(where: { $0.sessionId == "session-stop-fast" })
+            }
+        }
+
+        let stopEvent = HookEvent(
+            sessionId: "session-stop-fast",
+            provider: .codex,
+            cwd: "/tmp/stop-project",
+            transcriptPath: "/tmp/stop-project/rollout.jsonl",
+            event: "Stop",
+            status: "waiting_for_input",
+            pid: 123,
+            tty: "/dev/ttys009",
+            terminalName: "Apple_Terminal",
+            terminalWindowId: nil,
+            terminalTabId: nil,
+            terminalSurfaceId: nil,
+            turnId: nil,
+            tool: nil,
+            toolInput: nil,
+            toolUseId: nil,
+            notificationType: nil,
+            message: nil
+        )
+        await SessionStore.shared.process(.hookReceived(stopEvent))
+        await harness.sessionMonitor.schedulePostStopExitCheck(for: stopEvent)
+
+        try await waitUntil(timeout: 1.0) {
+            await MainActor.run {
+                !harness.sessionMonitor.instances.contains(where: { $0.sessionId == "session-stop-fast" })
+            }
+        }
+    }
+
+    @MainActor
     func testStartFreshLocalThreadUsesRequestedCwdAndReturnsSession() async throws {
         let connection = FakeRemoteConnection()
         let host = RemoteHostConfig(
@@ -1333,7 +1411,9 @@ final class PendingInteractionTests: XCTestCase {
     @MainActor
     private func makeLocalAppServerHarness(
         canSendTerminalInput: @escaping @Sendable (SessionState) -> Bool,
-        sendTerminalInput: @escaping @Sendable (String, SessionState) async -> Bool
+        sendTerminalInput: @escaping @Sendable (String, SessionState) async -> Bool,
+        processExistsHandler: @escaping @Sendable (Int) -> Bool = { _ in true },
+        stopExitCheckDelay: Duration = .milliseconds(250)
     ) -> LocalAppServerHarness {
         let connection = FakeRemoteConnection()
         let host = RemoteHostConfig(
@@ -1358,7 +1438,9 @@ final class PendingInteractionTests: XCTestCase {
         let sessionMonitor = CodexSessionMonitor(
             localAppServerMonitor: localMonitor,
             canSendTerminalInput: canSendTerminalInput,
-            sendTerminalInput: sendTerminalInput
+            sendTerminalInput: sendTerminalInput,
+            processExistsHandler: processExistsHandler,
+            stopExitCheckDelay: stopExitCheckDelay
         )
         TestObjectRetainer.retain(sessionMonitor)
 
