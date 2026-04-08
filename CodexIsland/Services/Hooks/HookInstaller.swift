@@ -237,7 +237,7 @@ struct HookInstaller {
         let featureBody = String(normalizedContent[featureBodyRange])
 
         if let codexHooksRange = normalizedContent.range(
-            of: #"(?m)^(\s*codex_hooks\s*=\s*)(true|false)\s*(#.*)?$"#,
+            of: #"(?m)^([ \t]*codex_hooks[ \t]*=[ \t]*)(true|false)([ \t]*(#.*)?)$"#,
             options: .regularExpression,
             range: featureBodyRange
         ) {

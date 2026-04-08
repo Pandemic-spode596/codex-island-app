@@ -31,6 +31,35 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertFalse(updatedConfig.contains("codex_hooks = false"))
     }
 
+    func testInstallIfNeededPreservesNewlineAfterReplacingCodexHooksBeforeNextSection() throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let codexDir = home.appendingPathComponent(".codex", isDirectory: true)
+        let hooksDir = codexDir.appendingPathComponent("hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+
+        let configToml = codexDir.appendingPathComponent("config.toml")
+        let bundledScript = home.appendingPathComponent("bundled.py")
+
+        try """
+        [features]
+        codex_hooks = false
+        [mcp_servers.chrome-devtools]
+        command = "npx"
+        """.write(to: configToml, atomically: true, encoding: .utf8)
+        try Data("new-script".utf8).write(to: bundledScript)
+
+        try HookInstaller.installIfNeeded(
+            homeDirectory: home,
+            bundledScriptURL: bundledScript
+        )
+
+        let updatedConfig = try String(contentsOf: configToml, encoding: .utf8)
+        XCTAssertTrue(updatedConfig.contains("codex_hooks = true\n[mcp_servers.chrome-devtools]"))
+        XCTAssertFalse(updatedConfig.contains("codex_hooks = true[mcp_servers.chrome-devtools]"))
+    }
+
     func testInstallIfNeededAddsCodexHooksInsideExistingFeaturesSectionWhenMissing() throws {
         let home = try makeTemporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
