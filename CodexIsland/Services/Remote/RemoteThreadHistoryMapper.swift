@@ -36,9 +36,11 @@ enum RemoteThreadHistoryMapper {
         case .agentMessage(let id, let text):
             return ChatHistoryItem(id: id, type: .assistant(text), timestamp: timestamp)
         case .reasoning(let id, let summary, let content):
-            let text = (summary + content).joined(separator: "\n")
+            let text = normalizedText(summary + content)
+            guard let text else { return nil }
             return ChatHistoryItem(id: id, type: .thinking(text), timestamp: timestamp)
         case .plan(let id, let text):
+            guard let text = normalizedText([text]) else { return nil }
             return ChatHistoryItem(id: id, type: .thinking(text), timestamp: timestamp)
         case .commandExecution(let id, let command, _, let status, let aggregatedOutput):
             return ChatHistoryItem(
@@ -139,5 +141,12 @@ enum RemoteThreadHistoryMapper {
         case .failed, .declined:
             return .error
         }
+    }
+
+    private static func normalizedText(_ lines: [String]) -> String? {
+        let text = lines
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 }
