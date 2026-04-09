@@ -28,49 +28,56 @@ class MainActivity : AppCompatActivity() {
                 pairingCode = binding.pairingCodeEditText.text?.toString().orEmpty()
             )
         }
-
-        binding.refreshButton.setOnClickListener {
-            viewModel.refreshRuntime()
+        binding.refreshButton.setOnClickListener { viewModel.refreshRuntime() }
+        binding.nextHostButton.setOnClickListener { viewModel.selectNextHost() }
+        binding.startThreadButton.setOnClickListener { viewModel.startThread() }
+        binding.nextThreadButton.setOnClickListener { viewModel.selectNextThread() }
+        binding.resumeThreadButton.setOnClickListener { viewModel.resumeThread() }
+        binding.sendMessageButton.setOnClickListener {
+            viewModel.sendMessage(binding.messageEditText.text?.toString().orEmpty())
         }
-
-        binding.nextHostButton.setOnClickListener {
-            viewModel.selectNextHost()
+        binding.interruptThreadButton.setOnClickListener { viewModel.interruptThread() }
+        binding.allowApprovalButton.setOnClickListener { viewModel.allowApproval() }
+        binding.denyApprovalButton.setOnClickListener { viewModel.denyApproval() }
+        binding.submitInputButton.setOnClickListener {
+            viewModel.submitUserInput(binding.userInputAnswerEditText.text?.toString().orEmpty())
         }
 
         viewModel.uiState.observe(this, ::render)
     }
 
     private fun render(state: ShellBootstrapUiState) {
-        if (!binding.deviceNameEditText.isFocused &&
-            binding.deviceNameEditText.text?.toString() != state.deviceName
-        ) {
-            binding.deviceNameEditText.setText(state.deviceName)
+        syncText(binding.deviceNameEditText.text?.toString(), state.deviceName, binding.deviceNameEditText.isFocused) {
+            binding.deviceNameEditText.setText(it)
         }
-
-        val tokenText = binding.authTokenEditText.text?.toString()
-        if (!binding.authTokenEditText.isFocused && tokenText != state.authToken) {
-            binding.authTokenEditText.setText(state.authToken)
+        syncText(binding.authTokenEditText.text?.toString(), state.authToken, binding.authTokenEditText.isFocused) {
+            binding.authTokenEditText.setText(it)
         }
-        if (!binding.hostConnectionEditText.isFocused &&
-            binding.hostConnectionEditText.text?.toString() != state.hostConnectionInput
-        ) {
-            binding.hostConnectionEditText.setText(state.hostConnectionInput)
+        syncText(binding.hostConnectionEditText.text?.toString(), state.hostConnectionInput, binding.hostConnectionEditText.isFocused) {
+            binding.hostConnectionEditText.setText(it)
         }
-        if (!binding.hostDisplayNameEditText.isFocused &&
-            binding.hostDisplayNameEditText.text?.toString() != state.hostDisplayName
-        ) {
-            binding.hostDisplayNameEditText.setText(state.hostDisplayName)
+        syncText(binding.hostDisplayNameEditText.text?.toString(), state.hostDisplayName, binding.hostDisplayNameEditText.isFocused) {
+            binding.hostDisplayNameEditText.setText(it)
         }
-        if (!binding.pairingCodeEditText.isFocused &&
-            binding.pairingCodeEditText.text?.toString() != state.pairingCode
-        ) {
-            binding.pairingCodeEditText.setText(state.pairingCode)
+        syncText(binding.pairingCodeEditText.text?.toString(), state.pairingCode, binding.pairingCodeEditText.isFocused) {
+            binding.pairingCodeEditText.setText(it)
+        }
+        syncText(binding.messageEditText.text?.toString(), state.messageDraft, binding.messageEditText.isFocused) {
+            binding.messageEditText.setText(it)
+        }
+        syncText(binding.userInputAnswerEditText.text?.toString(), state.userInputDraft, binding.userInputAnswerEditText.isFocused) {
+            binding.userInputAnswerEditText.setText(it)
         }
 
         binding.shellSubtitle.text = state.subtitle
         binding.runtimeStatusChip.text = state.runtimeStatus
         binding.activeHostSummaryValue.text = state.activeHostSummary
         binding.hostProfilesValue.text = state.hostProfilesSummary
+        binding.threadListValue.text = state.threadListSummary
+        binding.activeThreadValue.text = state.activeThreadSummary
+        binding.chatTranscriptValue.text = state.chatTranscript
+        binding.approvalValue.text = state.approvalSummary
+        binding.userInputValue.text = state.userInputSummary
         binding.engineStatusValue.text = state.engineStatus
         binding.bindingValue.text = state.bindingSurface
         binding.connectionValue.text = state.connection
@@ -83,7 +90,19 @@ class MainActivity : AppCompatActivity() {
         binding.pairStartPreviewValue.text = state.pairStartPreview
         binding.pairConfirmPreviewValue.text = state.pairConfirmPreview
         binding.reconnectPreviewValue.text = state.reconnectPreview
+        binding.threadListPreviewValue.text = state.threadListPreview
+        binding.threadStartPreviewValue.text = state.threadStartPreview
+        binding.threadResumePreviewValue.text = state.threadResumePreview
+        binding.turnStartPreviewValue.text = state.turnStartPreview
+        binding.turnSteerPreviewValue.text = state.turnSteerPreview
+        binding.interruptPreviewValue.text = state.interruptPreview
         binding.nextStepsValue.text = state.nextSteps
         binding.authTokenInputLayout.helperText = state.authTokenHelper
+    }
+
+    private fun syncText(current: String?, expected: String, isFocused: Boolean, update: (String) -> Unit) {
+        if (!isFocused && current != expected) {
+            update(expected)
+        }
     }
 }

@@ -63,6 +63,32 @@ class ShellBootstrapViewModelTest {
         assertTrue(viewModel.uiState.value?.activeHostSummary?.contains("Host Two") == true)
     }
 
+    @Test
+    fun threadWorkspaceSupportsMessageApprovalAndInterruptFlow() {
+        val profile = ShellProfile(
+            deviceName = "Android Companion",
+            hosts = listOf(
+                HostProfile("1", "Host One", "one.tail.ts.net:7331", "token-1", "AAA-111")
+            ),
+            activeHostId = "1"
+        )
+        val store = FakeShellProfileStore(profile)
+        val runtime = FakeRuntimeGateway()
+        val viewModel = ShellBootstrapViewModel(store, runtime, FakeHostProfileEditor())
+
+        viewModel.startThread()
+        viewModel.sendMessage("please /approve apply_patch to config")
+
+        assertTrue(viewModel.uiState.value?.approvalSummary?.contains("Command approval") == true)
+        assertTrue(runtime.lastActiveThreadId != null)
+
+        viewModel.allowApproval()
+        viewModel.interruptThread()
+
+        assertTrue(viewModel.uiState.value?.approvalSummary?.contains("No pending") == true)
+        assertTrue(viewModel.uiState.value?.activeThreadSummary?.contains("interrupted") == true)
+    }
+
     private class FakeShellProfileStore(
         var profile: ShellProfile = ShellProfile(
             deviceName = "Android Companion",
@@ -79,9 +105,17 @@ class ShellBootstrapViewModelTest {
 
     private class FakeRuntimeGateway : EngineRuntimeGateway {
         var lastHost: HostProfile? = null
+        var lastActiveThreadId: String? = null
 
-        override fun probe(hostProfile: HostProfile?, deviceName: String): EngineRuntimeProbeResult {
+        override fun probe(
+            hostProfile: HostProfile?,
+            deviceName: String,
+            activeThreadId: String?,
+            activeTurnId: String?,
+            draftMessage: String,
+        ): EngineRuntimeProbeResult {
             lastHost = hostProfile
+            lastActiveThreadId = activeThreadId
             return EngineRuntimeProbeResult(
                 runtimeLinked = true,
                 engineStatus = "ok",
@@ -96,6 +130,12 @@ class ShellBootstrapViewModelTest {
                 pairStartCommandPreview = "pair-start",
                 pairConfirmCommandPreview = "pair-confirm",
                 reconnectCommandPreview = "reconnect",
+                threadListCommandPreview = "thread-list",
+                threadStartCommandPreview = "thread-start",
+                threadResumeCommandPreview = "thread-resume",
+                turnStartCommandPreview = "turn-start",
+                turnSteerCommandPreview = "turn-steer",
+                interruptCommandPreview = "interrupt",
                 nextSteps = "next"
             )
         }

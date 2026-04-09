@@ -19,18 +19,36 @@ data class EngineRuntimeProbeResult(
     val pairStartCommandPreview: String,
     val pairConfirmCommandPreview: String,
     val reconnectCommandPreview: String,
+    val threadListCommandPreview: String,
+    val threadStartCommandPreview: String,
+    val threadResumeCommandPreview: String,
+    val turnStartCommandPreview: String,
+    val turnSteerCommandPreview: String,
+    val interruptCommandPreview: String,
     val nextSteps: String,
 )
 
 interface EngineRuntimeGateway {
-    fun probe(hostProfile: HostProfile?, deviceName: String): EngineRuntimeProbeResult
+    fun probe(
+        hostProfile: HostProfile?,
+        deviceName: String,
+        activeThreadId: String?,
+        activeTurnId: String?,
+        draftMessage: String,
+    ): EngineRuntimeProbeResult
 }
 
 class UniffiEngineRuntimeGateway(
     private val clientName: String,
     private val clientVersion: String,
 ) : EngineRuntimeGateway {
-    override fun probe(hostProfile: HostProfile?, deviceName: String): EngineRuntimeProbeResult {
+    override fun probe(
+        hostProfile: HostProfile?,
+        deviceName: String,
+        activeThreadId: String?,
+        activeTurnId: String?,
+        draftMessage: String,
+    ): EngineRuntimeProbeResult {
         return try {
             uniffiEnsureInitialized()
             EngineRuntime(
@@ -45,16 +63,9 @@ class UniffiEngineRuntimeGateway(
                 val state = runtime.state()
                 val snapshot = state.snapshot
                 val pairingCode = hostProfile?.lastPairingCode ?: "PAIR-123"
-                val pairStartPreview = hostProfile?.let {
-                    runtime.pairStartCommandJson(deviceName, ANDROID_PLATFORM)
-                } ?: "Select a host profile first."
-                val pairConfirmPreview = hostProfile?.let {
-                    runtime.pairConfirmCommandJson(pairingCode, deviceName, ANDROID_PLATFORM)
-                } ?: "Select a host profile and pairing code first."
-                val reconnectPreview = hostProfile?.let {
-                    "Reconnect to ${it.displayName} via ${it.hostAddress}, auth=" +
-                        if (it.authToken.isNullOrBlank()) "pending pairing" else "stored token"
-                } ?: "Select a host profile first."
+                val threadId = activeThreadId ?: "thread-preview"
+                val turnId = activeTurnId ?: "turn-preview"
+                val draftText = draftMessage.ifBlank { "Preview Android chat message" }
 
                 EngineRuntimeProbeResult(
                     runtimeLinked = true,
@@ -74,12 +85,57 @@ class UniffiEngineRuntimeGateway(
                         "protocol=${state.diagnostics.protocolErrorCount}",
                     lastError = state.lastError?.message ?: "none",
                     helloCommandPreview = runtime.helloCommandJson().take(140),
-                    pairStartCommandPreview = pairStartPreview.take(220),
-                    pairConfirmCommandPreview = pairConfirmPreview.take(220),
-                    reconnectCommandPreview = reconnectPreview,
+                    pairStartCommandPreview = (hostProfile?.let {
+                        runtime.pairStartCommandJson(deviceName, ANDROID_PLATFORM)
+                    } ?: "Select a host profile first.").take(220),
+                    pairConfirmCommandPreview = (hostProfile?.let {
+                        runtime.pairConfirmCommandJson(pairingCode, deviceName, ANDROID_PLATFORM)
+                    } ?: "Select a host profile and pairing code first.").take(220),
+                    reconnectCommandPreview = hostProfile?.let {
+                        "Reconnect to ${it.displayName} via ${it.hostAddress}, auth=" +
+                            if (it.authToken.isNullOrBlank()) "pending pairing" else "stored token"
+                    } ?: "Select a host profile first.",
+                    threadListCommandPreview = appServerRequestPreview(
+                        runtime = runtime,
+                        hostProfile = hostProfile,
+                        requestId = "req-thread-list",
+                        method = "thread/list",
+                        paramsJson = """{"limit":100}"""
+                    ),
+                    threadStartCommandPreview = appServerRequestPreview(
+                        runtime = runtime,
+                        hostProfile = hostProfile,
+                        requestId = "req-thread-start",
+                        method = "thread/start",
+                        paramsJson = """{}"""
+                    ),
+                    threadResumeCommandPreview = appServerRequestPreview(
+                        runtime = runtime,
+                        hostProfile = hostProfile,
+                        requestId = "req-thread-resume",
+                        method = "thread/resume",
+                        paramsJson = """{"threadId":"$threadId"}"""
+                    ),
+                    turnStartCommandPreview = appServerRequestPreview(
+                        runtime = runtime,
+                        hostProfile = hostProfile,
+                        requestId = "req-turn-start",
+                        method = "turn/start",
+                        paramsJson = """{"threadId":"$threadId","input":[{"type":"text","text":${jsonString(draftText)}}]}"""
+                    ).take(260),
+                    turnSteerCommandPreview = appServerRequestPreview(
+                        runtime = runtime,
+                        hostProfile = hostProfile,
+                        requestId = "req-turn-steer",
+                        method = "turn/steer",
+                        paramsJson = """{"threadId":"$threadId","expectedTurnId":"$turnId","input":[{"type":"text","text":${jsonString(draftText)}}]}"""
+                    ).take(260),
+                    interruptCommandPreview = (hostProfile?.let {
+                        runtime.appServerInterruptCommandJson(threadId, turnId)
+                    } ?: "Select a host profile first.").take(220),
                     nextSteps = "1. 接 transport 发送 pending commands。\n" +
                         "2. 把 host profile 绑定到 transport/foreground service。\n" +
-                        "3. 用 app-server request/interrupt 串起 thread/chat。",
+                        "3. 用 app-server request/interrupt 串起 thread/chat/approval。"
                 )
             }
         } catch (throwable: Throwable) {
@@ -103,14 +159,77 @@ class UniffiEngineRuntimeGateway(
                 reconnectCommandPreview = hostProfile?.let {
                     "Reconnect entry point ready for ${it.displayName} (${it.hostAddress})"
                 } ?: "Select a host profile first.",
+                threadListCommandPreview = if (hostProfile == null) {
+                    "Select a host profile first."
+                } else {
+                    """thread/list {"limit":100}"""
+                },
+                threadStartCommandPreview = if (hostProfile == null) {
+                    "Select a host profile first."
+                } else {
+                    """thread/start {}"""
+                },
+                threadResumeCommandPreview = if (hostProfile == null) {
+                    "Select a host profile first."
+                } else {
+                    """thread/resume {"threadId":"${activeThreadId ?: "thread-preview"}"}"""
+                },
+                turnStartCommandPreview = if (hostProfile == null) {
+                    "Select a host profile first."
+                } else {
+                    """turn/start {"threadId":"${activeThreadId ?: "thread-preview"}","input":[{"type":"text","text":"${draftMessage.ifBlank { "Preview Android chat message" }}"}]}"""
+                },
+                turnSteerCommandPreview = if (hostProfile == null) {
+                    "Select a host profile first."
+                } else {
+                    """turn/steer {"threadId":"${activeThreadId ?: "thread-preview"}","expectedTurnId":"${activeTurnId ?: "turn-preview"}"}"""
+                },
+                interruptCommandPreview = if (hostProfile == null) {
+                    "Select a host profile first."
+                } else {
+                    "turn/interrupt ${activeThreadId ?: "thread-preview"} ${activeTurnId ?: "turn-preview"}"
+                },
                 nextSteps = "1. 生成并打包 Android 可加载的 Rust dylib/so。\n" +
                     "2. 配置 transport 层把 JSON 命令送到 hostd。\n" +
-                    "3. 复用当前 bootstrap store 和 viewmodel 继续接业务流。",
+                    "3. 复用当前 bootstrap store 和 viewmodel 继续接业务流。"
             )
         }
     }
 
+    private fun appServerRequestPreview(
+        runtime: EngineRuntime,
+        hostProfile: HostProfile?,
+        requestId: String,
+        method: String,
+        paramsJson: String,
+    ): String {
+        if (hostProfile == null) {
+            return "Select a host profile first."
+        }
+        return runtime.appServerRequestCommandJson(
+            requestId = requestId,
+            method = method,
+            paramsJson = paramsJson
+        ).take(220)
+    }
+
     private companion object {
         private const val ANDROID_PLATFORM = "android"
+
+        private fun jsonString(value: String): String =
+            buildString {
+                append('"')
+                value.forEach { character ->
+                    when (character) {
+                        '\\' -> append("\\\\")
+                        '"' -> append("\\\"")
+                        '\n' -> append("\\n")
+                        '\r' -> append("\\r")
+                        '\t' -> append("\\t")
+                        else -> append(character)
+                    }
+                }
+                append('"')
+            }
     }
 }
