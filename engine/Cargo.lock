@@ -27,6 +27,8 @@ name = "codex-island-hostd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "codex-island-proto",
+ "serde_json",
 ]
 
 [[package]]

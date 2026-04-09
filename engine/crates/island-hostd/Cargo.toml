@@ -7,3 +7,5 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+codex-island-proto = { path = "../island-proto" }
+serde_json.workspace = true
