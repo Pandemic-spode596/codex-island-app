@@ -10,3 +10,4 @@ anyhow.workspace = true
 codex-island-proto = { path = "../island-proto" }
 serde.workspace = true
 serde_json.workspace = true
+tungstenite = "0.24"

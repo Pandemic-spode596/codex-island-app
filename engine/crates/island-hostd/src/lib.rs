@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -14,6 +15,7 @@ use codex_island_proto::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tungstenite::{Message, WebSocket, accept};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnConfig {
@@ -865,20 +867,163 @@ fn generate_pairing_code() -> String {
     format!("{:03}-{:03}", (nanos / 1000) % 1000, nanos % 1000)
 }
 
+#[derive(Debug, Clone)]
+pub struct HostDaemonServerConfig {
+    pub bind_addr: SocketAddr,
+    pub daemon: HostDaemonConfig,
+    pub poll_interval: Duration,
+}
+
+impl HostDaemonServerConfig {
+    pub fn local(bind_addr: SocketAddr, shell: &Path) -> Self {
+        Self {
+            bind_addr,
+            daemon: HostDaemonConfig::local(shell),
+            poll_interval: Duration::from_millis(200),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum IncomingShellFrame {
+    Command(ClientCommand),
+    Envelope(codex_island_proto::ProtocolEnvelope<ClientCommand>),
+}
+
+pub fn serve_host_daemon(config: HostDaemonServerConfig) -> Result<()> {
+    let listener = TcpListener::bind(config.bind_addr)
+        .with_context(|| format!("bind hostd websocket listener: {}", config.bind_addr))?;
+
+    for stream in listener.incoming() {
+        let stream = stream.context("accept hostd client stream")?;
+        let daemon_config = config.daemon.clone();
+        let poll_interval = config.poll_interval;
+        if let Err(error) = handle_host_daemon_client(stream, daemon_config, poll_interval) {
+            eprintln!("codex-island-hostd: dropping client after session error: {error:#}");
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_host_daemon_client(
+    stream: TcpStream,
+    daemon_config: HostDaemonConfig,
+    poll_interval: Duration,
+) -> Result<()> {
+    stream
+        .set_read_timeout(Some(poll_interval))
+        .context("set hostd websocket read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .context("set hostd websocket write timeout")?;
+
+    let mut socket = accept(stream).context("accept websocket handshake")?;
+    let mut daemon = HostDaemon::new(daemon_config);
+    send_server_events(&mut socket, daemon.start(), None)?;
+
+    loop {
+        match socket.read() {
+            Ok(message) => {
+                if !handle_ws_message(&mut socket, &mut daemon, message)? {
+                    break;
+                }
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => {
+                break;
+            }
+            Err(error) => return Err(error).context("read hostd websocket frame"),
+        }
+
+        let poll_events = daemon.poll();
+        if !poll_events.is_empty() {
+            send_server_events(&mut socket, poll_events, None)?;
+        }
+    }
+
+    daemon.stop().context("stop host daemon after websocket closes")?;
+    Ok(())
+}
+
+fn handle_ws_message(
+    socket: &mut WebSocket<TcpStream>,
+    daemon: &mut HostDaemon,
+    message: Message,
+) -> Result<bool> {
+    match message {
+        Message::Text(text) => {
+            let incoming: IncomingShellFrame =
+                serde_json::from_str(&text).context("decode hostd shell frame")?;
+            let (reply_id, command) = match incoming {
+                IncomingShellFrame::Command(command) => (None, command),
+                IncomingShellFrame::Envelope(envelope) => (Some(envelope.id), envelope.payload),
+            };
+            let events = daemon.handle_command(command);
+            send_server_events(socket, events, reply_id.as_deref())?;
+            Ok(true)
+        }
+        Message::Binary(_) => Ok(true),
+        Message::Ping(payload) => {
+            socket.send(Message::Pong(payload)).context("send websocket pong")?;
+            Ok(true)
+        }
+        Message::Pong(_) => Ok(true),
+        Message::Close(_) => {
+            socket.close(None).ok();
+            Ok(false)
+        }
+        Message::Frame(_) => Ok(true),
+    }
+}
+
+fn send_server_events(
+    socket: &mut WebSocket<TcpStream>,
+    events: Vec<ServerEvent>,
+    reply_id: Option<&str>,
+) -> Result<()> {
+    for event in events {
+        let payload = if let Some(id) = reply_id {
+            serde_json::to_string(&codex_island_proto::ProtocolEnvelope {
+                id: id.to_string(),
+                payload: event,
+            })
+        } else {
+            serde_json::to_string(&event)
+        }
+        .context("serialize hostd server event")?;
+
+        socket
+            .send(Message::Text(payload))
+            .context("send hostd websocket frame")?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::SystemTime;
     use std::time::{Duration, Instant};
 
-    use codex_island_proto::{ClientCommand, ErrorCode, HostHealthStatus, ServerEvent};
+    use codex_island_proto::{
+        ClientCommand, ErrorCode, HostHealthStatus, ProtocolEnvelope, ServerEvent,
+    };
     use serde_json::json;
+    use tungstenite::{Message, connect};
 
     use super::{
         ChildEvent, HostDaemon, HostDaemonConfig, HostPlatform, ManagedChild, SpawnConfig,
-        codex_app_server_command,
+        codex_app_server_command, handle_host_daemon_client,
     };
 
     struct FakeAppServerHarness {
@@ -1198,6 +1343,77 @@ mod tests {
             snapshot.health.app_server.last_error.as_deref(),
             Some("boom")
         );
+    }
+
+    #[test]
+    fn websocket_server_accepts_hello_and_snapshot_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral listener");
+        let bind_addr = listener.local_addr().expect("local addr");
+        let state_dir = unique_temp_dir("hostd-ws-state");
+        let server_thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept test stream");
+            handle_host_daemon_client(
+                stream,
+                HostDaemonConfig {
+                    host_id: "host-ws".into(),
+                    hostname: "devbox".into(),
+                    platform: HostPlatform::Macos,
+                    spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 2"]),
+                    state_dir,
+                },
+                Duration::from_millis(50),
+            )
+            .expect("run websocket server");
+        });
+
+        let url = format!("ws://{bind_addr}");
+        let (mut socket, _) = connect(url.as_str()).expect("connect websocket");
+
+        let startup = socket.read().expect("startup frame");
+        let startup_text = startup.into_text().expect("startup text");
+        let startup_event: ServerEvent =
+            serde_json::from_str(&startup_text).expect("decode startup event");
+        assert!(matches!(startup_event, ServerEvent::HostHealthChanged { .. }));
+
+        let hello = ProtocolEnvelope {
+            id: "msg-1".to_string(),
+            payload: ClientCommand::Hello {
+                protocol_version: "v1".into(),
+                client_name: "android-shell".into(),
+                client_version: "0.1.0".into(),
+                auth_token: None,
+            },
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&hello).expect("encode hello"),
+            ))
+            .expect("send hello");
+        let hello_reply = socket.read().expect("read hello reply");
+        let hello_text = hello_reply.into_text().expect("hello text");
+        let hello_event: ProtocolEnvelope<ServerEvent> =
+            serde_json::from_str(&hello_text).expect("decode hello envelope");
+        assert_eq!(hello_event.id, "msg-1");
+        assert!(matches!(hello_event.payload, ServerEvent::HelloAck { .. }));
+
+        let snapshot = ProtocolEnvelope {
+            id: "msg-2".to_string(),
+            payload: ClientCommand::GetSnapshot,
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&snapshot).expect("encode snapshot request"),
+            ))
+            .expect("send snapshot");
+        let snapshot_reply = socket.read().expect("read snapshot reply");
+        let snapshot_text = snapshot_reply.into_text().expect("snapshot text");
+        let snapshot_event: ProtocolEnvelope<ServerEvent> =
+            serde_json::from_str(&snapshot_text).expect("decode snapshot envelope");
+        assert_eq!(snapshot_event.id, "msg-2");
+        assert!(matches!(snapshot_event.payload, ServerEvent::Snapshot { .. }));
+
+        socket.close(None).expect("close websocket");
+        server_thread.join().expect("join websocket server");
     }
 
     #[test]
