@@ -162,6 +162,7 @@ nonisolated enum EngineShellCommandIntent: Equatable, Sendable {
 nonisolated protocol SharedEngineRuntimeDriving: Sendable {
     func currentState() -> SharedEngineRuntimeState
     func applyServerEvent(_ eventJSON: String) throws -> SharedEngineRuntimeState
+    func popNextCommandJSON() -> String?
     @discardableResult
     func send(_ intent: EngineShellCommandIntent) throws -> SharedEngineRuntimeState?
 }
@@ -187,6 +188,10 @@ final class EngineRuntimeCommandAdapter: SharedEngineRuntimeDriving, @unchecked 
 
     func applyServerEvent(_ eventJSON: String) throws -> SharedEngineRuntimeState {
         try eventApplier(eventJSON)
+    }
+
+    func popNextCommandJSON() -> String? {
+        nil
     }
 
     @discardableResult

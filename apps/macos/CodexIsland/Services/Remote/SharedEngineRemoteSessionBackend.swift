@@ -18,6 +18,11 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
 
     private let runtime: any SharedEngineRuntimeDriving
     private let hostID: String
+    private let hostdProcess: BundledHostdProcess?
+    private let webSocketTransport: LocalHostdWebSocketTransport?
+    private let deviceName: String
+    private let clientPlatform: String
+    private let localStateDirectory: URL?
 
     var hostsPublisher: AnyPublisher<[RemoteHostConfig], Never> {
         $hosts.eraseToAnyPublisher()
@@ -46,16 +51,56 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
         self.hosts = [host]
         self.hostID = host.id
         self.runtime = runtime
+        self.hostdProcess = nil
+        self.webSocketTransport = nil
+        self.deviceName = "Codex Island macOS"
+        self.clientPlatform = "macos"
+        self.localStateDirectory = nil
+        apply(runtimeState: runtime.currentState())
+    }
+
+    convenience init(localHost host: RemoteHostConfig) {
+        let runtime = UniffiSharedEngineRuntimeDriver(
+            clientName: "Codex Island macOS",
+            clientVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+            authToken: nil
+        )
+        let bindAddress = "127.0.0.1:7331"
+        let socketURL = URL(string: "ws://\(bindAddress)")!
+        self.init(
+            host: host,
+            runtime: runtime,
+            hostdProcess: BundledHostdProcess(),
+            webSocketTransport: LocalHostdWebSocketTransport(url: socketURL),
+            deviceName: "Codex Island macOS",
+            clientPlatform: "macos",
+            localStateDirectory: Self.defaultLocalStateDirectory()
+        )
+    }
+
+    private init(
+        host: RemoteHostConfig,
+        runtime: any SharedEngineRuntimeDriving,
+        hostdProcess: BundledHostdProcess?,
+        webSocketTransport: LocalHostdWebSocketTransport?,
+        deviceName: String,
+        clientPlatform: String,
+        localStateDirectory: URL?
+    ) {
+        self.hosts = [host]
+        self.hostID = host.id
+        self.runtime = runtime
+        self.hostdProcess = hostdProcess
+        self.webSocketTransport = webSocketTransport
+        self.deviceName = deviceName
+        self.clientPlatform = clientPlatform
+        self.localStateDirectory = localStateDirectory
         apply(runtimeState: runtime.currentState())
     }
 
     func startMonitoring() {
-        do {
-            _ = try runtime.send(.requestConnection)
-            _ = try runtime.send(.getSnapshot)
-            apply(runtimeState: runtime.currentState())
-        } catch {
-            hostActionErrors[hostID] = error.localizedDescription
+        Task { @MainActor [weak self] in
+            await self?.startEngineTransport()
         }
     }
 
@@ -83,6 +128,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
     func refreshHostNow(id: String) async throws {
         guard id == hostID else { return }
         _ = try runtime.send(.getSnapshot)
+        try await flushPendingCommands()
         apply(runtimeState: runtime.currentState())
     }
 
@@ -111,12 +157,16 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
 
     func connectHost(id: String) {
         guard id == hostID else { return }
-        do {
-            _ = try runtime.send(.requestConnection)
-            _ = try runtime.send(.getSnapshot)
-            apply(runtimeState: runtime.currentState())
-        } catch {
-            hostActionErrors[id] = error.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try self.runtime.send(.requestConnection)
+                _ = try self.runtime.send(.getSnapshot)
+                try await self.flushPendingCommands()
+                self.apply(runtimeState: self.runtime.currentState())
+            } catch {
+                self.hostActionErrors[id] = error.localizedDescription
+            }
         }
     }
 
@@ -128,6 +178,8 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
         } catch {
             hostActionErrors[id] = error.localizedDescription
         }
+        webSocketTransport?.disconnect(reason: "Disconnected by user")
+        hostdProcess?.stop()
         apply(runtimeState: runtime.currentState())
     }
 
@@ -152,6 +204,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
             method: "thread/start",
             paramsJSON: payload
         ))
+        try await flushPendingCommands()
         apply(runtimeState: runtime.currentState())
 
         guard let thread = threads.first else {
@@ -172,6 +225,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
             method: "thread/resume",
             paramsJSON: payload
         ))
+        try await flushPendingCommands()
         apply(runtimeState: runtime.currentState())
 
         if let thread = findThread(hostId: hostId, threadId: threadId, transcriptPath: nil) {
@@ -206,6 +260,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
             method: method,
             paramsJSON: payload
         ))
+        try await flushPendingCommands()
         appendLocalInfoMessage(thread: thread, message: "Queued via shared engine: \(text)")
         apply(runtimeState: runtime.currentState())
     }
@@ -221,6 +276,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
     func interrupt(thread: RemoteThreadState) async throws {
         guard let turnId = thread.activeTurnId else { return }
         _ = try runtime.send(.appServerInterrupt(threadId: thread.threadId, turnId: turnId))
+        try await flushPendingCommands()
         apply(runtimeState: runtime.currentState())
     }
 
@@ -238,6 +294,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
             requestId: "approval-\(thread.threadId)",
             resultJSON: JSONEncoderPayload.object(["decision": .string(decision)]).jsonString
         ))
+        try await flushPendingCommands()
         apply(runtimeState: runtime.currentState())
     }
 
@@ -255,6 +312,7 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
                 "answers": .object(serializedAnswers)
             ]).jsonString
         ))
+        try await flushPendingCommands()
         apply(runtimeState: runtime.currentState())
     }
 
@@ -285,7 +343,70 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
 
     func applyServerEventJSON(_ eventJSON: String) throws {
         let state = try runtime.applyServerEvent(eventJSON)
+        handleProtocolEvent(eventJSON)
         apply(runtimeState: state)
+    }
+
+    private func startEngineTransport() async {
+        do {
+            if let hostdProcess, let localStateDirectory {
+                try hostdProcess.start(bindAddress: "127.0.0.1:7331", stateDirectory: localStateDirectory)
+            }
+
+            webSocketTransport?.connect(
+                onMessage: { [weak self] text in
+                    Task { @MainActor in
+                        try? self?.applyServerEventJSON(text)
+                        try? await self?.flushPendingCommands()
+                    }
+                },
+                onDisconnect: { [weak self] reason in
+                    guard let self else { return }
+                    _ = try? self.runtime.send(.transportDisconnected(reason: reason))
+                    self.apply(runtimeState: self.runtime.currentState())
+                }
+            )
+
+            _ = try runtime.send(.requestConnection)
+            _ = try runtime.send(.getSnapshot)
+            try await flushPendingCommands()
+            apply(runtimeState: runtime.currentState())
+        } catch {
+            hostActionErrors[hostID] = error.localizedDescription
+            hostStates[hostID] = .failed(error.localizedDescription)
+        }
+    }
+
+    private func flushPendingCommands() async throws {
+        while let commandJSON = runtime.popNextCommandJSON() {
+            try await webSocketTransport?.send(commandJSON)
+        }
+    }
+
+    private func handleProtocolEvent(_ eventJSON: String) {
+        guard let data = eventJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = object["type"] as? String else {
+            return
+        }
+
+        switch type {
+        case "pairing_started":
+            guard let pairing = object["pairing"] as? [String: Any],
+                  let code = pairing["pairing_code"] as? String else {
+                return
+            }
+            _ = try? runtime.send(.pairConfirm(
+                pairingCode: code,
+                deviceName: deviceName,
+                clientPlatform: clientPlatform
+            ))
+        case "pairing_completed":
+            _ = try? runtime.send(.requestConnection)
+            _ = try? runtime.send(.getSnapshot)
+        default:
+            break
+        }
     }
 
     private func apply(runtimeState: SharedEngineRuntimeState) {
@@ -316,6 +437,12 @@ final class SharedEngineRemoteSessionBackend: ObservableObject, RemoteSessionCon
         } else {
             hostActionErrors.removeValue(forKey: hostID)
         }
+    }
+
+    private static func defaultLocalStateDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return base.appendingPathComponent("CodexIsland/hostd", isDirectory: true)
     }
 }
 

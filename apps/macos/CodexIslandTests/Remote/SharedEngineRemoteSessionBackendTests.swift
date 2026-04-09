@@ -19,6 +19,7 @@ final class SharedEngineRemoteSessionBackendTests: XCTestCase {
         )
 
         backend.startMonitoring()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         XCTAssertEqual(runtime.sentIntents, [.requestConnection, .getSnapshot])
         XCTAssertEqual(backend.hostStates["host-1"], .connecting)
@@ -142,8 +143,7 @@ final class SharedEngineRemoteSessionBackendTests: XCTestCase {
     }
 }
 
-@MainActor
-private final class FakeSharedEngineRuntimeDriver: SharedEngineRuntimeDriving {
+private final class FakeSharedEngineRuntimeDriver: @unchecked Sendable, SharedEngineRuntimeDriving {
     var sentIntents: [EngineShellCommandIntent] = []
     var state: SharedEngineRuntimeState
     var nextAppliedState: SharedEngineRuntimeState?
@@ -183,5 +183,9 @@ private final class FakeSharedEngineRuntimeDriver: SharedEngineRuntimeDriving {
             break
         }
         return state
+    }
+
+    func popNextCommandJSON() -> String? {
+        nil
     }
 }

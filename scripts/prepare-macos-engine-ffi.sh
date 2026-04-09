@@ -15,10 +15,16 @@ fi
 cd "$ENGINE_DIR"
 
 cargo build --release -p codex-island-client-ffi >/dev/null
+cargo build --release -p codex-island-hostd >/dev/null
 
 LIB_PATH="$ENGINE_DIR/target/release/libcodex_island_client_ffi.dylib"
+HOSTD_PATH="$ENGINE_DIR/target/release/codex-island-hostd"
 if [[ ! -f "$LIB_PATH" ]]; then
     echo "missing UniFFI dynamic library at $LIB_PATH" >&2
+    exit 1
+fi
+if [[ ! -f "$HOSTD_PATH" ]]; then
+    echo "missing hostd binary at $HOSTD_PATH" >&2
     exit 1
 fi
 
@@ -33,3 +39,8 @@ cp "$LIB_PATH" "$temp_lib"
 install_name_tool -id "@rpath/libcodex_island_client_ffi.dylib" "$temp_lib"
 cp "$temp_lib" "$OUT_DIR/libcodex_island_client_ffi.dylib"
 rm -f "$temp_lib"
+
+engine_resource_dir="$(cd "$OUT_DIR/.." && pwd)/Resources/Engine"
+mkdir -p "$engine_resource_dir"
+cp "$HOSTD_PATH" "$engine_resource_dir/codex-island-hostd"
+chmod +x "$engine_resource_dir/codex-island-hostd"

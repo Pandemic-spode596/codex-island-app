@@ -34,6 +34,10 @@ final class UniffiSharedEngineRuntimeDriver: SharedEngineRuntimeDriving, @unchec
         try runtime.applyServerEventJson(eventJson: eventJSON).sharedEngineState
     }
 
+    func popNextCommandJSON() -> String? {
+        runtime.popNextCommandJson()
+    }
+
     @discardableResult
     func send(_ intent: EngineShellCommandIntent) throws -> SharedEngineRuntimeState? {
         switch intent {

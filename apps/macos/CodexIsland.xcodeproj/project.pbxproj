@@ -122,6 +122,7 @@
 			);
 			outputPaths = (
 				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/libcodex_island_client_ffi.dylib",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Engine/codex-island-hostd",
 				"$(SRCROOT)/Generated/Engine/module.modulemap",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
