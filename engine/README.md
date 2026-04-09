@@ -23,3 +23,6 @@ Regenerate them with:
 ```bash
 ./scripts/generate-engine-bindings.sh
 ```
+
+The shell/runtime boundary is documented in
+[`docs/shell-adapter-contract.md`](./docs/shell-adapter-contract.md).
