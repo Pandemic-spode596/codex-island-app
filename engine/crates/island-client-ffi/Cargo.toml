@@ -5,5 +5,19 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+bindgen = ["uniffi/cli"]
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
 [dependencies]
 codex-island-core = { path = "../island-core" }
+codex-island-proto = { path = "../island-proto" }
+serde_json.workspace = true
+uniffi.workspace = true

@@ -9,6 +9,17 @@ This workspace is now the stable home for:
 - host daemon process management
 - future Kotlin / Swift FFI bindings
 
-The current implementation is still scaffold-level, but the repository now
-organizes all engine work under `engine/` instead of the old `sidecar/`
-placeholder.
+## Client bindings
+
+`crates/island-client-ffi` now exports a UniFFI object surface for the shared
+client runtime. The generated bindings are checked in for the two shell
+targets:
+
+- Kotlin: `apps/android/app/src/main/java/uniffi/codex_island_client/`
+- Swift: `apps/macos/Generated/Engine/`
+
+Regenerate them with:
+
+```bash
+./scripts/generate-engine-bindings.sh
+```

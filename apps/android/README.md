@@ -9,4 +9,11 @@ This app is intentionally thin:
   interaction.
 
 The current Android project is only a bootstrap skeleton. It will consume the
-shared engine through generated bindings in a later step.
+shared engine through generated bindings checked into
+`app/src/main/java/uniffi/codex_island_client/`.
+
+Regenerate the Kotlin and Swift UniFFI bindings from the repository root with:
+
+```bash
+./scripts/generate-engine-bindings.sh
+```
