@@ -7,10 +7,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use codex_island_proto::{
-    AppServerHealth, AppServerLifecycleState, ClientCommand, ENGINE_PROTOCOL_VERSION,
+    AppServerHealth, AppServerLifecycleState, AuthToken, ClientCommand, ENGINE_PROTOCOL_VERSION,
     EngineSnapshot, ErrorCode, HostCapabilities, HostHealthSnapshot, HostHealthStatus,
-    HostPlatform, ProtocolError, ServerEvent,
+    HostPlatform, PairedDeviceRecord, PairingSession, PairingSessionStatus, ProtocolError,
+    ServerEvent,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +243,7 @@ pub struct HostDaemonConfig {
     pub hostname: String,
     pub platform: HostPlatform,
     pub spawn: SpawnConfig,
+    pub state_dir: PathBuf,
 }
 
 impl HostDaemonConfig {
@@ -250,33 +253,51 @@ impl HostDaemonConfig {
             hostname: hostname_fallback(),
             platform: current_platform(),
             spawn: codex_app_server_command(shell),
+            state_dir: default_state_dir(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct HostStore {
+    active_pairing: Option<PairingSession>,
+    paired_devices: Vec<StoredDeviceRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredDeviceRecord {
+    device: PairedDeviceRecord,
+    token: AuthToken,
 }
 
 pub struct HostDaemon {
     config: HostDaemonConfig,
     child: Option<ManagedChild>,
+    store: HostStore,
     started_at: String,
     observed_at: String,
     last_error: Option<String>,
     last_exit_code: Option<i32>,
     restart_count: u32,
     next_event_id: u64,
+    authenticated_device_id: Option<String>,
 }
 
 impl HostDaemon {
     pub fn new(config: HostDaemonConfig) -> Self {
         let now = now_string();
+        let store = load_store(&config.state_dir).unwrap_or_default();
         Self {
             config,
             child: None,
+            store,
             started_at: now.clone(),
             observed_at: now,
             last_error: None,
             last_exit_code: None,
             restart_count: 0,
             next_event_id: 1,
+            authenticated_device_id: None,
         }
     }
 
@@ -297,7 +318,9 @@ impl HostDaemon {
     pub fn handle_command(&mut self, command: ClientCommand) -> Vec<ServerEvent> {
         match command {
             ClientCommand::Hello {
-                protocol_version, ..
+                protocol_version,
+                auth_token,
+                ..
             } => {
                 if protocol_version != ENGINE_PROTOCOL_VERSION {
                     return vec![ServerEvent::Error {
@@ -312,21 +335,158 @@ impl HostDaemon {
                     }];
                 }
 
+                let authenticated = match auth_token {
+                    Some(token) => match self.authenticate_token(&token) {
+                        Some(device_id) => {
+                            self.authenticated_device_id = Some(device_id);
+                            true
+                        }
+                        None => {
+                            self.authenticated_device_id = None;
+                            return vec![ServerEvent::Error {
+                                error: ProtocolError {
+                                    code: ErrorCode::Unauthorized,
+                                    message: "Invalid auth token".into(),
+                                    retryable: Some(false),
+                                    details: None,
+                                },
+                            }];
+                        }
+                    },
+                    None => {
+                        self.authenticated_device_id = None;
+                        false
+                    }
+                };
+
                 vec![ServerEvent::HelloAck {
                     protocol_version: ENGINE_PROTOCOL_VERSION.into(),
                     daemon_version: env!("CARGO_PKG_VERSION").into(),
                     host_id: self.config.host_id.clone(),
-                    authenticated: false,
+                    authenticated,
                 }]
             }
             ClientCommand::GetSnapshot => vec![ServerEvent::Snapshot {
                 snapshot: self.snapshot(),
             }],
+            ClientCommand::PairStart {
+                device_name,
+                client_platform: _,
+            } => {
+                let pairing = PairingSession {
+                    pairing_code: generate_pairing_code(),
+                    session_id: generate_session_id("pair"),
+                    status: PairingSessionStatus::Pending,
+                    expires_at: now_string(),
+                    device_name: Some(device_name),
+                };
+                self.store.active_pairing = Some(pairing.clone());
+                if let Err(error) = self.persist_store() {
+                    return vec![self.internal_error("Failed to persist pairing session", error)];
+                }
+                vec![ServerEvent::PairingStarted { pairing }]
+            }
+            ClientCommand::PairConfirm {
+                pairing_code,
+                device_name,
+                client_platform,
+            } => {
+                let Some(active_pairing) = self.store.active_pairing.clone() else {
+                    return vec![ServerEvent::Error {
+                        error: ProtocolError {
+                            code: ErrorCode::PairingRequired,
+                            message: "No active pairing session".into(),
+                            retryable: Some(true),
+                            details: None,
+                        },
+                    }];
+                };
+
+                if active_pairing.pairing_code != pairing_code {
+                    return vec![ServerEvent::Error {
+                        error: ProtocolError {
+                            code: ErrorCode::PairingCodeExpired,
+                            message: "Pairing code is invalid".into(),
+                            retryable: Some(false),
+                            details: None,
+                        },
+                    }];
+                }
+
+                let pairing = PairingSession {
+                    status: PairingSessionStatus::Confirmed,
+                    device_name: Some(device_name.clone()),
+                    ..active_pairing
+                };
+                let token = AuthToken {
+                    token_id: generate_session_id("token"),
+                    bearer_token: generate_session_id("bearer"),
+                    expires_at: None,
+                };
+                let device = PairedDeviceRecord {
+                    device_id: generate_session_id("device"),
+                    device_name,
+                    platform: client_platform,
+                    created_at: now_string(),
+                    last_seen_at: Some(now_string()),
+                    last_ip: None,
+                };
+                self.store.active_pairing = None;
+                self.store.paired_devices.push(StoredDeviceRecord {
+                    device: device.clone(),
+                    token: token.clone(),
+                });
+                if let Err(error) = self.persist_store() {
+                    return vec![self.internal_error("Failed to persist paired device", error)];
+                }
+                vec![ServerEvent::PairingCompleted {
+                    pairing,
+                    device,
+                    token,
+                }]
+            }
+            ClientCommand::PairRevoke { device_id } => {
+                if !self.is_authenticated() {
+                    return vec![ServerEvent::Error {
+                        error: ProtocolError {
+                            code: ErrorCode::Unauthorized,
+                            message: "Authenticated device token required".into(),
+                            retryable: Some(false),
+                            details: None,
+                        },
+                    }];
+                }
+
+                if !self.remove_device(&device_id) {
+                    return vec![ServerEvent::Error {
+                        error: ProtocolError {
+                            code: ErrorCode::DeviceNotFound,
+                            message: "Paired device not found".into(),
+                            retryable: Some(false),
+                            details: None,
+                        },
+                    }];
+                }
+                if let Err(error) = self.persist_store() {
+                    return vec![self.internal_error("Failed to persist revoked device", error)];
+                }
+                vec![ServerEvent::PairingRevoked { device_id }]
+            }
             ClientCommand::AppServerRequest {
                 request_id,
                 method,
                 params,
             } => {
+                if !self.is_authenticated() {
+                    return vec![ServerEvent::Error {
+                        error: ProtocolError {
+                            code: ErrorCode::PairingRequired,
+                            message: "Pair and authenticate before using app-server bridge".into(),
+                            retryable: Some(false),
+                            details: None,
+                        },
+                    }];
+                }
                 if let Err(error) = self.send_to_app_server(json!({
                     "id": request_id,
                     "method": method,
@@ -337,6 +497,17 @@ impl HostDaemon {
                 Vec::new()
             }
             ClientCommand::AppServerInterrupt { thread_id, turn_id } => {
+                if !self.is_authenticated() {
+                    return vec![ServerEvent::Error {
+                        error: ProtocolError {
+                            code: ErrorCode::PairingRequired,
+                            message: "Pair and authenticate before interrupting app-server turns"
+                                .into(),
+                            retryable: Some(false),
+                            details: None,
+                        },
+                    }];
+                }
                 if let Err(error) = self.send_to_app_server(json!({
                     "id": format!("interrupt-{thread_id}-{turn_id}"),
                     "method": "turn/interrupt",
@@ -349,16 +520,6 @@ impl HostDaemon {
                 }
                 Vec::new()
             }
-            ClientCommand::PairStart { .. }
-            | ClientCommand::PairConfirm { .. }
-            | ClientCommand::PairRevoke { .. } => vec![ServerEvent::Error {
-                error: ProtocolError {
-                    code: ErrorCode::UnsupportedCommand,
-                    message: "Pairing store is not implemented in island-hostd yet".into(),
-                    retryable: Some(false),
-                    details: None,
-                },
-            }],
         }
     }
 
@@ -407,8 +568,13 @@ impl HostDaemon {
         EngineSnapshot {
             health: self
                 .health_snapshot(self.current_host_status(), self.current_app_server_state()),
-            active_pairing: None,
-            paired_devices: Vec::new(),
+            active_pairing: self.store.active_pairing.clone(),
+            paired_devices: self
+                .store
+                .paired_devices
+                .iter()
+                .map(|record| record.device.clone())
+                .collect(),
             active_thread_id: None,
             active_turn_id: None,
         }
@@ -567,12 +733,12 @@ impl HostDaemon {
                 restart_count: self.restart_count,
             },
             capabilities: HostCapabilities {
-                pairing: false,
+                pairing: true,
                 app_server_bridge: true,
                 transcript_fallback: false,
                 reconnect_resume: true,
             },
-            paired_device_count: 0,
+            paired_device_count: self.store.paired_devices.len() as u32,
         }
     }
 
@@ -582,6 +748,46 @@ impl HostDaemon {
                 code: ErrorCode::AppServerUnavailable,
                 message: "App-server bridge is unavailable".into(),
                 retryable: Some(true),
+                details: Some(json!({
+                    "error": error.to_string()
+                })),
+            },
+        }
+    }
+
+    fn authenticate_token(&self, bearer_token: &str) -> Option<String> {
+        self.store
+            .paired_devices
+            .iter()
+            .find(|record| record.token.bearer_token == bearer_token)
+            .map(|record| record.device.device_id.clone())
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.authenticated_device_id.is_some()
+    }
+
+    fn remove_device(&mut self, device_id: &str) -> bool {
+        let initial_len = self.store.paired_devices.len();
+        self.store
+            .paired_devices
+            .retain(|record| record.device.device_id != device_id);
+        if self.authenticated_device_id.as_deref() == Some(device_id) {
+            self.authenticated_device_id = None;
+        }
+        self.store.paired_devices.len() != initial_len
+    }
+
+    fn persist_store(&self) -> Result<()> {
+        save_store(&self.config.state_dir, &self.store)
+    }
+
+    fn internal_error(&self, message: &str, error: anyhow::Error) -> ServerEvent {
+        ServerEvent::Error {
+            error: ProtocolError {
+                code: ErrorCode::Internal,
+                message: message.into(),
+                retryable: Some(false),
                 details: Some(json!({
                     "error": error.to_string()
                 })),
@@ -614,6 +820,49 @@ fn current_platform() -> HostPlatform {
     } else {
         HostPlatform::Linux
     }
+}
+
+fn default_state_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".codex-island/hostd")
+}
+
+fn store_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("paired-devices.json")
+}
+
+fn load_store(state_dir: &Path) -> Result<HostStore> {
+    let path = store_path(state_dir);
+    if !path.exists() {
+        return Ok(HostStore::default());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("read host store: {}", path.display()))?;
+    serde_json::from_str(&content).with_context(|| format!("decode host store: {}", path.display()))
+}
+
+fn save_store(state_dir: &Path, store: &HostStore) -> Result<()> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("create host state dir: {}", state_dir.display()))?;
+    let path = store_path(state_dir);
+    let content = serde_json::to_string_pretty(store).context("serialize host store")?;
+    std::fs::write(&path, content).with_context(|| format!("write host store: {}", path.display()))
+}
+
+fn generate_session_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_nanos();
+    format!("{prefix}-{nanos}")
+}
+
+fn generate_pairing_code() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .subsec_nanos();
+    format!("{:03}-{:03}", (nanos / 1000) % 1000, nanos % 1000)
 }
 
 #[cfg(test)]
@@ -726,6 +975,7 @@ mod tests {
             spawn: SpawnConfig::new("/bin/sh")
                 .args(["-c", "sleep 1"])
                 .cwd(&temp),
+            state_dir: temp.join("state"),
         });
 
         let startup = hostd.start();
@@ -762,14 +1012,39 @@ mod tests {
             printf '{\"method\":\"thread/started\",\"params\":{\"threadId\":\"thread-1\"}}\\n'; \
             break; \
         done";
+        let state_dir = unique_temp_dir("hostd-normalize-state");
         let mut hostd = HostDaemon::new(HostDaemonConfig {
             host_id: "host-2".into(),
             hostname: "linux-box".into(),
             platform: HostPlatform::Linux,
             spawn: SpawnConfig::new("/bin/sh").args(["-c", script]),
+            state_dir,
         });
 
         hostd.start();
+        let pairing_code = match &hostd.handle_command(ClientCommand::PairStart {
+            device_name: "Pixel".into(),
+            client_platform: "android".into(),
+        })[0]
+        {
+            ServerEvent::PairingStarted { pairing } => pairing.pairing_code.clone(),
+            other => panic!("unexpected pair start: {other:?}"),
+        };
+        let token = match &hostd.handle_command(ClientCommand::PairConfirm {
+            pairing_code,
+            device_name: "Pixel".into(),
+            client_platform: "android".into(),
+        })[0]
+        {
+            ServerEvent::PairingCompleted { token, .. } => token.bearer_token.clone(),
+            other => panic!("unexpected pair complete: {other:?}"),
+        };
+        let _ = hostd.handle_command(ClientCommand::Hello {
+            protocol_version: "v1".into(),
+            client_name: "shell".into(),
+            client_version: "0.1.0".into(),
+            auth_token: Some(token),
+        });
         let command_events = hostd.handle_command(ClientCommand::AppServerRequest {
             request_id: "req-1".into(),
             method: "thread/start".into(),
@@ -812,6 +1087,7 @@ mod tests {
             hostname: "linux-box".into(),
             platform: HostPlatform::Linux,
             spawn: SpawnConfig::new("/bin/sh").args(["-c", &script]),
+            state_dir: temp.join("state"),
         });
 
         hostd.start();
@@ -857,6 +1133,7 @@ mod tests {
             hostname: "devbox".into(),
             platform: HostPlatform::Macos,
             spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 1"]),
+            state_dir: unique_temp_dir("hostd-invalid-auth"),
         });
 
         let events = hostd.handle_command(ClientCommand::Hello {
@@ -869,6 +1146,189 @@ mod tests {
             &events[0],
             ServerEvent::Error { error }
             if error.code == ErrorCode::InvalidProtocolVersion
+        ));
+    }
+
+    #[test]
+    fn pairing_persists_device_and_allows_authenticated_hello() {
+        let temp = unique_temp_dir("hostd-pair");
+        let mut hostd = HostDaemon::new(HostDaemonConfig {
+            host_id: "host-5".into(),
+            hostname: "devbox".into(),
+            platform: HostPlatform::Macos,
+            spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 1"]),
+            state_dir: temp.join("state"),
+        });
+
+        let started = hostd.handle_command(ClientCommand::PairStart {
+            device_name: "Pixel".into(),
+            client_platform: "android".into(),
+        });
+        let pairing_code = match &started[0] {
+            ServerEvent::PairingStarted { pairing } => pairing.pairing_code.clone(),
+            other => panic!("unexpected pairing start: {other:?}"),
+        };
+
+        let completed = hostd.handle_command(ClientCommand::PairConfirm {
+            pairing_code,
+            device_name: "Pixel".into(),
+            client_platform: "android".into(),
+        });
+        let token = match &completed[0] {
+            ServerEvent::PairingCompleted { token, device, .. } => {
+                assert_eq!(device.device_name, "Pixel");
+                token.bearer_token.clone()
+            }
+            other => panic!("unexpected pairing complete: {other:?}"),
+        };
+
+        let snapshot = hostd.snapshot();
+        assert_eq!(snapshot.health.paired_device_count, 1);
+        assert_eq!(snapshot.paired_devices.len(), 1);
+
+        let hello = hostd.handle_command(ClientCommand::Hello {
+            protocol_version: "v1".into(),
+            client_name: "shell".into(),
+            client_version: "0.1.0".into(),
+            auth_token: Some(token),
+        });
+        assert!(matches!(
+            &hello[0],
+            ServerEvent::HelloAck { authenticated, .. } if *authenticated
+        ));
+
+        let persisted = std::fs::read_to_string(temp.join("state/paired-devices.json"))
+            .expect("read persisted store");
+        assert!(persisted.contains("Pixel"));
+    }
+
+    #[test]
+    fn app_server_bridge_requires_pairing_authentication() {
+        let mut hostd = HostDaemon::new(HostDaemonConfig {
+            host_id: "host-6".into(),
+            hostname: "linux-box".into(),
+            platform: HostPlatform::Linux,
+            spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 1"]),
+            state_dir: unique_temp_dir("hostd-auth-required"),
+        });
+
+        let events = hostd.handle_command(ClientCommand::AppServerRequest {
+            request_id: "req-1".into(),
+            method: "thread/start".into(),
+            params: json!({}),
+        });
+        assert!(matches!(
+            &events[0],
+            ServerEvent::Error { error } if error.code == ErrorCode::PairingRequired
+        ));
+    }
+
+    #[test]
+    fn revoke_removes_persisted_device_and_invalidates_token() {
+        let temp = unique_temp_dir("hostd-revoke");
+        let mut hostd = HostDaemon::new(HostDaemonConfig {
+            host_id: "host-7".into(),
+            hostname: "devbox".into(),
+            platform: HostPlatform::Macos,
+            spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 1"]),
+            state_dir: temp.join("state"),
+        });
+
+        let pairing_code = match &hostd.handle_command(ClientCommand::PairStart {
+            device_name: "iPhone".into(),
+            client_platform: "ios".into(),
+        })[0]
+        {
+            ServerEvent::PairingStarted { pairing } => pairing.pairing_code.clone(),
+            other => panic!("unexpected pair start: {other:?}"),
+        };
+
+        let (device_id, token) = match &hostd.handle_command(ClientCommand::PairConfirm {
+            pairing_code,
+            device_name: "iPhone".into(),
+            client_platform: "ios".into(),
+        })[0]
+        {
+            ServerEvent::PairingCompleted { device, token, .. } => {
+                (device.device_id.clone(), token.bearer_token.clone())
+            }
+            other => panic!("unexpected pair complete: {other:?}"),
+        };
+
+        let _ = hostd.handle_command(ClientCommand::Hello {
+            protocol_version: "v1".into(),
+            client_name: "shell".into(),
+            client_version: "0.1.0".into(),
+            auth_token: Some(token.clone()),
+        });
+        let revoked = hostd.handle_command(ClientCommand::PairRevoke {
+            device_id: device_id.clone(),
+        });
+        assert!(matches!(
+            &revoked[0],
+            ServerEvent::PairingRevoked { device_id: revoked_id } if revoked_id == &device_id
+        ));
+
+        let hello = hostd.handle_command(ClientCommand::Hello {
+            protocol_version: "v1".into(),
+            client_name: "shell".into(),
+            client_version: "0.1.0".into(),
+            auth_token: Some(token),
+        });
+        assert!(matches!(
+            &hello[0],
+            ServerEvent::Error { error } if error.code == ErrorCode::Unauthorized
+        ));
+    }
+
+    #[test]
+    fn store_is_loaded_on_restart() {
+        let temp = unique_temp_dir("hostd-store-reload");
+        let state_dir = temp.join("state");
+
+        let mut hostd = HostDaemon::new(HostDaemonConfig {
+            host_id: "host-8".into(),
+            hostname: "devbox".into(),
+            platform: HostPlatform::Macos,
+            spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 1"]),
+            state_dir: state_dir.clone(),
+        });
+        let pairing_code = match &hostd.handle_command(ClientCommand::PairStart {
+            device_name: "Tablet".into(),
+            client_platform: "android".into(),
+        })[0]
+        {
+            ServerEvent::PairingStarted { pairing } => pairing.pairing_code.clone(),
+            other => panic!("unexpected pair start: {other:?}"),
+        };
+        let token = match &hostd.handle_command(ClientCommand::PairConfirm {
+            pairing_code,
+            device_name: "Tablet".into(),
+            client_platform: "android".into(),
+        })[0]
+        {
+            ServerEvent::PairingCompleted { token, .. } => token.bearer_token.clone(),
+            other => panic!("unexpected pair complete: {other:?}"),
+        };
+        drop(hostd);
+
+        let mut reloaded = HostDaemon::new(HostDaemonConfig {
+            host_id: "host-8".into(),
+            hostname: "devbox".into(),
+            platform: HostPlatform::Macos,
+            spawn: SpawnConfig::new("/bin/sh").args(["-c", "sleep 1"]),
+            state_dir,
+        });
+        assert_eq!(reloaded.snapshot().paired_devices.len(), 1);
+        let hello = reloaded.handle_command(ClientCommand::Hello {
+            protocol_version: "v1".into(),
+            client_name: "shell".into(),
+            client_version: "0.1.0".into(),
+            auth_token: Some(token),
+        });
+        assert!(matches!(
+            &hello[0],
+            ServerEvent::HelloAck { authenticated, .. } if *authenticated
         ));
     }
 
