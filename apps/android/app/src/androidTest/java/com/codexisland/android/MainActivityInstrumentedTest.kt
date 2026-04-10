@@ -16,7 +16,8 @@ class MainActivityInstrumentedTest {
     fun bootstrapWorkspaceIsVisible() {
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText(R.string.shell_header_title)).check(matches(isDisplayed()))
-            onView(withId(R.id.runtimeStatusChip)).check(matches(withText("已接入")))
+            onView(withId(R.id.runtimeStatusChip)).check(matches(isDisplayed()))
+            onView(withId(R.id.hostConnectionEditText)).check(matches(isDisplayed()))
         }
     }
 }

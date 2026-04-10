@@ -133,6 +133,21 @@
                         android:inputType="textNoSuggestions|textVisiblePassword" />
                 </com.google.android.material.textfield.TextInputLayout>
 
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/sshPasswordInputLayout"
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:hint="@string/ssh_password_label">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/sshPasswordEditText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="textNoSuggestions|textVisiblePassword" />
+                </com.google.android.material.textfield.TextInputLayout>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -164,6 +179,57 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="@string/next_host" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/generateSshKeyButton"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/generate_ssh_keypair" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/ssh_key_status_label"
+                    android:textColor="@color/ci_muted"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/sshKeyStatusValue"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/ci_text" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/ssh_public_key_label"
+                    android:textColor="@color/ci_muted"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/sshPublicKeyValue"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/ci_text" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/ssh_install_command_label"
+                    android:textColor="@color/ci_muted"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/sshInstallCommandValue"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/ci_text" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

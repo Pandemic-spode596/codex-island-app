@@ -6,7 +6,13 @@
     <string name="host_connection_label">Host address or QR payload</string>
     <string name="host_display_name_label">Host display name</string>
     <string name="auth_token_label">Auth token</string>
+    <string name="hostd_auth_token_label">Hostd auth token</string>
+    <string name="ssh_password_label">SSH password</string>
     <string name="pairing_code_label">Pairing code</string>
+    <string name="generate_ssh_keypair">Generate SSH keypair</string>
+    <string name="ssh_key_status_label">SSH key status</string>
+    <string name="ssh_public_key_label">SSH public key</string>
+    <string name="ssh_install_command_label">Remote install command</string>
     <string name="save_host">Save host profile</string>
     <string name="refresh_runtime">Refresh runtime probe</string>
     <string name="next_host">Next host</string>

@@ -25,6 +25,7 @@ class MainActivity : AppCompatActivity() {
                 hostConnectionInput = binding.hostConnectionEditText.text?.toString().orEmpty(),
                 hostDisplayName = binding.hostDisplayNameEditText.text?.toString().orEmpty(),
                 authToken = binding.authTokenEditText.text?.toString().orEmpty(),
+                sshPassword = binding.sshPasswordEditText.text?.toString().orEmpty(),
                 pairingCode = binding.pairingCodeEditText.text?.toString().orEmpty()
             )
         }
@@ -35,6 +36,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
         binding.nextHostButton.setOnClickListener { viewModel.selectNextHost() }
+        binding.generateSshKeyButton.setOnClickListener { viewModel.generateSshKeyPair() }
         binding.startThreadButton.setOnClickListener { viewModel.startThread() }
         binding.nextThreadButton.setOnClickListener { viewModel.selectNextThread() }
         binding.resumeThreadButton.setOnClickListener { viewModel.resumeThread() }
@@ -55,8 +57,11 @@ class MainActivity : AppCompatActivity() {
         syncText(binding.deviceNameEditText.text?.toString(), state.deviceName, binding.deviceNameEditText.isFocused) {
             binding.deviceNameEditText.setText(it)
         }
-        syncText(binding.authTokenEditText.text?.toString(), state.authToken, binding.authTokenEditText.isFocused) {
+        syncText(binding.authTokenEditText.text?.toString(), state.hostdAuthToken, binding.authTokenEditText.isFocused) {
             binding.authTokenEditText.setText(it)
+        }
+        syncText(binding.sshPasswordEditText.text?.toString(), state.sshPassword, binding.sshPasswordEditText.isFocused) {
+            binding.sshPasswordEditText.setText(it)
         }
         syncText(binding.hostConnectionEditText.text?.toString(), state.hostConnectionInput, binding.hostConnectionEditText.isFocused) {
             binding.hostConnectionEditText.setText(it)
@@ -65,7 +70,7 @@ class MainActivity : AppCompatActivity() {
             binding.hostDisplayNameEditText.setText(it)
         }
         syncText(binding.pairingCodeEditText.text?.toString(), state.pairingCode, binding.pairingCodeEditText.isFocused) {
-            binding.pairingCodeEditText.setText(it)
+        binding.pairingCodeEditText.setText(it)
         }
         syncText(binding.messageEditText.text?.toString(), state.messageDraft, binding.messageEditText.isFocused) {
             binding.messageEditText.setText(it)
@@ -75,6 +80,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.shellSubtitle.text = state.subtitle
+        binding.hostConnectionInputLayout.helperText = state.hostConnectionHelper
+        binding.authTokenInputLayout.hint = getString(R.string.hostd_auth_token_label)
+        binding.authTokenInputLayout.helperText = state.hostdAuthTokenHelper
+        binding.authTokenInputLayout.visibility = if (state.showHostdAuthToken) android.view.View.VISIBLE else android.view.View.GONE
+        binding.sshPasswordInputLayout.helperText = state.sshPasswordHelper
+        binding.sshPasswordInputLayout.visibility = if (state.showSshPassword) android.view.View.VISIBLE else android.view.View.GONE
+        binding.pairingCodeInputLayout.visibility = if (state.showPairingCode) android.view.View.VISIBLE else android.view.View.GONE
+        binding.generateSshKeyButton.visibility = if (state.showSshKeyTools) android.view.View.VISIBLE else android.view.View.GONE
+        binding.sshKeyStatusValue.visibility = if (state.showSshKeyTools) android.view.View.VISIBLE else android.view.View.GONE
+        binding.sshPublicKeyValue.visibility = if (state.showSshKeyTools) android.view.View.VISIBLE else android.view.View.GONE
+        binding.sshInstallCommandValue.visibility = if (state.showSshKeyTools) android.view.View.VISIBLE else android.view.View.GONE
+        binding.sshKeyStatusValue.text = state.sshKeyStatus
+        binding.sshPublicKeyValue.text = state.sshPublicKey
+        binding.sshInstallCommandValue.text = state.sshInstallCommand
         binding.runtimeStatusChip.text = state.runtimeStatus
         binding.activeHostSummaryValue.text = state.activeHostSummary
         binding.hostProfilesValue.text = state.hostProfilesSummary
@@ -102,7 +121,6 @@ class MainActivity : AppCompatActivity() {
         binding.turnSteerPreviewValue.text = state.turnSteerPreview
         binding.interruptPreviewValue.text = state.interruptPreview
         binding.nextStepsValue.text = state.nextSteps
-        binding.authTokenInputLayout.helperText = state.authTokenHelper
     }
 
     private fun syncText(current: String?, expected: String, isFocused: Boolean, update: (String) -> Unit) {

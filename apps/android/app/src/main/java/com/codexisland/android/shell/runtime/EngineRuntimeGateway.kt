@@ -1,6 +1,12 @@
 package com.codexisland.android.shell.runtime
 
 import com.codexisland.android.shell.storage.HostProfile
+import com.codexisland.android.shell.storage.HostConnectionMode
+import com.codexisland.android.shell.storage.GeneratedSshKeyPair
+import com.codexisland.android.shell.storage.SecureShellStore
+import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.connection.channel.direct.Session
+import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -22,6 +28,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 data class EngineRuntimeProbeResult(
     val runtimeLinked: Boolean,
@@ -93,6 +100,11 @@ class UniffiEngineRuntimeGateway(
     private var nativeLoadFailure: Throwable? = null
     private var socket: WebSocket? = null
     private var socketState: SocketState = SocketState.DISCONNECTED
+    private var directSession: DirectSshAppServerSession? = null
+    private var directState: DirectSessionState = DirectSessionState.DISCONNECTED
+    private var directInitialized: Boolean = false
+    private var directBootstrapTask: ScheduledFuture<*>? = null
+    private var lastDirectError: String? = null
     private var reconnectTask: ScheduledFuture<*>? = null
     private val threads = LinkedHashMap<String, AndroidThreadState>()
     private var selectedThreadId: String? = null
@@ -112,10 +124,16 @@ class UniffiEngineRuntimeGateway(
 
     override fun refresh() {
         synchronized(lock) {
-            val runtime = ensureRuntimeLocked() ?: return
             if (currentHost == null) {
                 return
             }
+
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                connectDirectSessionLocked()
+                return
+            }
+
+            val runtime = ensureRuntimeLocked() ?: return
 
             requestConnectionLocked(runtime)
             val state = runtime.state()
@@ -140,6 +158,15 @@ class UniffiEngineRuntimeGateway(
     override fun startThread() {
         synchronized(lock) {
             if (currentHost == null) {
+                return
+            }
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                connectDirectSessionLocked()
+                sendDirectRequestLocked(
+                    nextRequestId(REQUEST_THREAD_START),
+                    "thread/start",
+                    JSONObject()
+                )
                 return
             }
             val runtime = ensureRuntimeLocked() ?: return
@@ -169,6 +196,16 @@ class UniffiEngineRuntimeGateway(
             if (currentHost == null) {
                 return
             }
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                val thread = currentThreadLocked() ?: return
+                connectDirectSessionLocked()
+                sendDirectRequestLocked(
+                    nextRequestId(REQUEST_THREAD_RESUME),
+                    "thread/resume",
+                    JSONObject().put("threadId", thread.threadId)
+                )
+                return
+            }
             val runtime = ensureRuntimeLocked() ?: return
             val thread = currentThreadLocked() ?: return
             requestConnectionLocked(runtime)
@@ -189,6 +226,38 @@ class UniffiEngineRuntimeGateway(
 
         synchronized(lock) {
             if (currentHost == null) {
+                return
+            }
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                val thread = currentThreadLocked() ?: return
+                connectDirectSessionLocked()
+
+                val payload = JSONObject()
+                    .put("threadId", thread.threadId)
+                    .put("input", JSONArray().put(textInput(trimmed)))
+
+                val method: String
+                if (thread.activeTurnId.isNullOrBlank()) {
+                    method = "turn/start"
+                } else {
+                    method = "turn/steer"
+                    payload.put("expectedTurnId", thread.activeTurnId)
+                }
+
+                upsertThreadLocked(
+                    thread.copy(
+                        status = "sending",
+                        history = thread.history + AndroidChatEntry(role = "user", text = trimmed)
+                    )
+                )
+
+                sendDirectRequestLocked(
+                    nextRequestId(
+                        if (method == "turn/start") REQUEST_TURN_START else REQUEST_TURN_STEER
+                    ),
+                    method,
+                    payload
+                )
                 return
             }
             val runtime = ensureRuntimeLocked() ?: return
@@ -230,6 +299,19 @@ class UniffiEngineRuntimeGateway(
             if (currentHost == null) {
                 return
             }
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                val thread = currentThreadLocked() ?: return
+                val turnId = thread.activeTurnId ?: return
+                connectDirectSessionLocked()
+                sendDirectRequestLocked(
+                    nextRequestId("turn-interrupt"),
+                    "turn/interrupt",
+                    JSONObject()
+                        .put("threadId", thread.threadId)
+                        .put("turnId", turnId)
+                )
+                return
+            }
             val runtime = ensureRuntimeLocked() ?: return
             val thread = currentThreadLocked() ?: return
             val turnId = thread.activeTurnId ?: return
@@ -242,6 +324,23 @@ class UniffiEngineRuntimeGateway(
     override fun respondToApproval(allow: Boolean) {
         synchronized(lock) {
             if (currentHost == null) {
+                return
+            }
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                val thread = currentThreadLocked() ?: return
+                val approval = thread.pendingApproval ?: return
+                connectDirectSessionLocked()
+                sendDirectResponseLocked(approval.requestId, approval.responsePayload(allow))
+                upsertThreadLocked(
+                    thread.copy(
+                        status = "active",
+                        pendingApproval = null,
+                        history = thread.history + AndroidChatEntry(
+                            role = "approval",
+                            text = if (allow) "Approval accepted." else "Approval declined."
+                        )
+                    )
+                )
                 return
             }
             val runtime = ensureRuntimeLocked() ?: return
@@ -278,6 +377,23 @@ class UniffiEngineRuntimeGateway(
             if (currentHost == null) {
                 return
             }
+            if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+                val thread = currentThreadLocked() ?: return
+                val userInput = thread.pendingUserInput ?: return
+                connectDirectSessionLocked()
+                sendDirectResponseLocked(userInput.requestId, userInput.responsePayload(trimmed))
+                upsertThreadLocked(
+                    thread.copy(
+                        status = "active",
+                        pendingUserInput = null,
+                        history = thread.history + AndroidChatEntry(
+                            role = "user-input",
+                            text = trimmed
+                        )
+                    )
+                )
+                return
+            }
             val runtime = ensureRuntimeLocked() ?: return
             val thread = currentThreadLocked() ?: return
             val userInput = thread.pendingUserInput ?: return
@@ -304,9 +420,14 @@ class UniffiEngineRuntimeGateway(
         synchronized(lock) {
             reconnectTask?.cancel(false)
             reconnectTask = null
+            directBootstrapTask?.cancel(false)
+            directBootstrapTask = null
             socket?.close(1000, "gateway closed")
             socket = null
             socketState = SocketState.DISCONNECTED
+            directSession?.close()
+            directSession = null
+            directState = DirectSessionState.DISCONNECTED
             runtime?.close()
             runtime = null
             threads.clear()
@@ -337,12 +458,24 @@ class UniffiEngineRuntimeGateway(
         }
     }
 
+    private fun activeConnectionModeLocked(): HostConnectionMode {
+        val host = currentHost ?: return HostConnectionMode.HOSTD_WEBSOCKET
+        return SecureShellStore.inferConnectionMode(host.hostAddress)
+    }
+
     private fun resetSessionLocked() {
         reconnectTask?.cancel(false)
         reconnectTask = null
+        directBootstrapTask?.cancel(false)
+        directBootstrapTask = null
         socket?.cancel()
         socket = null
         socketState = SocketState.DISCONNECTED
+        directSession?.close()
+        directSession = null
+        directState = DirectSessionState.DISCONNECTED
+        directInitialized = false
+        lastDirectError = null
         runtime?.close()
         runtime = null
         threads.clear()
@@ -372,6 +505,11 @@ class UniffiEngineRuntimeGateway(
     }
 
     private fun requestConnectionLocked(runtime: EngineRuntime) {
+        if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+            connectDirectSessionLocked()
+            return
+        }
+
         runtime.requestConnection()
         if (socketState == SocketState.DISCONNECTED) {
             connectSocketLocked()
@@ -445,6 +583,74 @@ class UniffiEngineRuntimeGateway(
         )
     }
 
+    private fun connectDirectSessionLocked() {
+        val host = currentHost ?: return
+        if (directState == DirectSessionState.CONNECTING || directState == DirectSessionState.OPEN) {
+            return
+        }
+
+        val target = normalizeSshTarget(host.hostAddress)
+        val password = host.sshPassword?.takeIf { it.isNotBlank() }
+        val keyPair = host.sshKeyPair()
+        if (target == null || (password == null && keyPair == null)) {
+            lastDirectError = "SSH direct 模式需要 user@host，且至少提供 SSH key 或 password。"
+            directState = DirectSessionState.FAILED
+            return
+        }
+
+        directState = DirectSessionState.CONNECTING
+        lastDirectError = null
+        directSession = DirectSshAppServerSession(
+            sshTarget = target,
+            password = password,
+            keyPair = keyPair,
+            onLine = { line ->
+                scheduler.execute {
+                    synchronized(lock) {
+                        handleDirectMessageLocked(line)
+                    }
+                }
+            },
+            onFailure = { message ->
+                scheduler.execute {
+                    synchronized(lock) {
+                        directSession = null
+                        directState = DirectSessionState.DISCONNECTED
+                        directInitialized = false
+                        lastDirectError = message
+                        scheduleDirectReconnectLocked()
+                    }
+                }
+            },
+            onOpen = {
+                scheduler.execute {
+                    synchronized(lock) {
+                        directState = DirectSessionState.OPEN
+                        lastDirectError = null
+                        sendDirectRequestLocked(
+                            requestId = REQUEST_INITIALIZE,
+                            method = "initialize",
+                            params = JSONObject()
+                                .put(
+                                    "capabilities",
+                                    JSONObject().put("experimentalApi", true)
+                                )
+                                .put(
+                                    "clientInfo",
+                                    JSONObject()
+                                        .put("name", clientName)
+                                        .put("title", "Codex Island")
+                                        .put("version", clientVersion)
+                                )
+                        )
+                    }
+                }
+            }
+        ).also { session ->
+            session.open()
+        }
+    }
+
     private fun handleTransportDropLocked(reason: String) {
         val runtime = runtime ?: return
         runtime.transportDisconnected(reason)
@@ -471,6 +677,120 @@ class UniffiEngineRuntimeGateway(
             },
             delayMs,
             TimeUnit.MILLISECONDS
+        )
+    }
+
+    private fun scheduleDirectReconnectLocked() {
+        directBootstrapTask?.cancel(false)
+        directBootstrapTask = null
+        directBootstrapTask = scheduler.schedule(
+            {
+                synchronized(lock) {
+                    connectDirectSessionLocked()
+                }
+            },
+            1_000L,
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    private fun sendDirectRequestLocked(requestId: String, method: String, params: JSONObject) {
+        try {
+            directSession?.send(
+                JSONObject()
+                    .put("id", requestId)
+                    .put("method", method)
+                    .put("params", params)
+                    .toString()
+            ) ?: run {
+                lastDirectError = "SSH direct session is unavailable."
+            }
+        } catch (throwable: Throwable) {
+            lastDirectError = throwable.message ?: "Failed to send SSH direct request."
+        }
+    }
+
+    private fun sendDirectNotificationLocked(method: String, params: JSONObject?) {
+        try {
+            val payload = JSONObject().put("method", method)
+            if (params == null) {
+                payload.put("params", JSONObject.NULL)
+            } else {
+                payload.put("params", params)
+            }
+            directSession?.send(payload.toString()) ?: run {
+                lastDirectError = "SSH direct session is unavailable."
+            }
+        } catch (throwable: Throwable) {
+            lastDirectError = throwable.message ?: "Failed to send SSH direct notification."
+        }
+    }
+
+    private fun sendDirectResponseLocked(requestId: String, result: JSONObject) {
+        try {
+            directSession?.send(
+                JSONObject()
+                    .put("id", requestId)
+                    .put("result", result)
+                    .toString()
+            ) ?: run {
+                lastDirectError = "SSH direct session is unavailable."
+            }
+        } catch (throwable: Throwable) {
+            lastDirectError = throwable.message ?: "Failed to send SSH direct response."
+        }
+    }
+
+    private fun handleDirectMessageLocked(rawMessage: String) {
+        val event = JSONObject(rawMessage)
+        if (event.optString("id") == REQUEST_INITIALIZE && event.has("result")) {
+            directInitialized = true
+            sendDirectNotificationLocked("initialized", null)
+            enqueueDirectThreadListLocked()
+            return
+        }
+
+        if (event.has("id") && event.has("result")) {
+            handleAppServerResponseLocked(event.optString("id"), event.optJSONObject("result"))
+            return
+        }
+
+        if (event.has("method")) {
+            handleAppServerPayloadLocked(event)
+            return
+        }
+
+        if (event.has("error")) {
+            lastDirectError = event.optJSONObject("error")?.optString("message")
+        }
+    }
+
+    private fun normalizeSshTarget(rawTarget: String): String? {
+        val trimmed = rawTarget.trim()
+        if (trimmed.isEmpty()) {
+            return null
+        }
+        return trimmed.removePrefix("ssh://").takeIf { it.contains('@') }
+    }
+
+    private fun enqueueDirectThreadListLocked() {
+        if (!directInitialized) {
+            return
+        }
+        sendDirectRequestLocked(
+            nextRequestId(REQUEST_THREAD_LIST),
+            "thread/list",
+            JSONObject().put("limit", 100)
+        )
+    }
+
+    private fun HostProfile.sshKeyPair(): GeneratedSshKeyPair? {
+        val publicKey = sshPublicKeyPkcs8 ?: return null
+        val privateKey = sshPrivateKeyPkcs8 ?: return null
+        return GeneratedSshKeyPair(
+            publicKeyOpenSsh = sshPublicKey.orEmpty(),
+            publicKeyPkcs8Base64 = publicKey,
+            privateKeyPkcs8Base64 = privateKey
         )
     }
 
@@ -869,6 +1189,9 @@ class UniffiEngineRuntimeGateway(
     private fun renderLocked(): EngineRuntimeProbeResult {
         val host = currentHost
         val nativeError = nativeLoadFailure
+        if (activeConnectionModeLocked() == HostConnectionMode.SSH_DIRECT_APP_SERVER) {
+            return renderDirectSshResult(host)
+        }
         val runtime = ensureRuntimeLocked()
         if (runtime == null) {
             return fallbackResult(host, nativeError)
@@ -1098,6 +1421,50 @@ class UniffiEngineRuntimeGateway(
         )
     }
 
+    private fun renderDirectSshResult(hostProfile: HostProfile?): EngineRuntimeProbeResult {
+        val thread = currentThreadLocked()
+        val connection = when (directState) {
+            DirectSessionState.OPEN -> "ssh-direct / app-server=connected"
+            DirectSessionState.CONNECTING -> "ssh-direct / app-server=connecting"
+            DirectSessionState.FAILED -> "ssh-direct / app-server=failed"
+            DirectSessionState.DISCONNECTED -> "ssh-direct / app-server=disconnected"
+        }
+        val sshTarget = hostProfile?.hostAddress ?: "Select a host profile first."
+        return EngineRuntimeProbeResult(
+            runtimeLinked = true,
+            engineStatus = "SSH direct mode: Android will launch remote codex app-server on demand.",
+            bindingSurface = "ssh-direct-app-server",
+            connection = connection,
+            commandQueue = "direct session / initialized=$directInitialized",
+            pairedDevices = "not used in ssh direct mode",
+            reconnect = if (directState == DirectSessionState.OPEN) "idle" else "retry on failure",
+            diagnostics = "threads=${threads.size}, lastError=${lastDirectError ?: "none"}",
+            lastError = lastDirectError ?: "none",
+            helloCommandPreview = """ssh $sshTarget 'exec codex app-server --listen stdio://'""",
+            pairStartCommandPreview = "not used in ssh direct mode",
+            pairConfirmCommandPreview = "not used in ssh direct mode",
+            reconnectCommandPreview = "Reconnect will reopen SSH and relaunch codex app-server.",
+            threadListCommandPreview = """{"method":"thread/list","params":{"limit":100}}""",
+            threadStartCommandPreview = """{"method":"thread/start","params":{}}""",
+            threadResumeCommandPreview = """{"method":"thread/resume","params":{"threadId":"thread-preview"}}""",
+            turnStartCommandPreview = """{"method":"turn/start","params":{"threadId":"thread-preview","input":[{"type":"text","text":"Android live message"}]}}""",
+            turnSteerCommandPreview = """{"method":"turn/steer","params":{"threadId":"thread-preview","expectedTurnId":"turn-preview","input":[{"type":"text","text":"Android live message"}]}}""",
+            interruptCommandPreview = """{"method":"turn/interrupt","params":{"threadId":"thread-preview","turnId":"turn-preview"}}""",
+            nextSteps = if (hostProfile == null) {
+                "1. 保存一个 SSH host，例如 ssh://user@host。\n2. 在 Auth token 输入 SSH password。\n3. 点击 Refresh，Android 会直连 SSH 并拉起 codex app-server。"
+            } else {
+                "1. Refresh 会通过 SSH 拉起远端 codex app-server。\n2. thread/chat/approval/user-input 将直接走 app-server。\n3. 当前模式不需要预先手动启动 hostd。"
+            },
+            authToken = hostProfile?.authToken,
+            pairingCode = null,
+            threadListSummary = threadListSummary(),
+            activeThreadSummary = thread?.summary() ?: "尚未创建 thread。",
+            chatTranscript = thread?.history?.joinToString("\n\n") { "[${it.role}] ${it.text}" } ?: "No chat yet.",
+            approvalSummary = thread?.pendingApproval?.let { "${it.title}\n${it.detail}" } ?: "No pending approvals.",
+            userInputSummary = thread?.pendingUserInput?.question ?: "No pending user-input requests."
+        )
+    }
+
     private fun unwrapServerEvent(rawMessage: String): String {
         val root = JSONObject(rawMessage)
         return if (root.has("payload") && root.has("id") && !root.has("type")) {
@@ -1157,6 +1524,7 @@ class UniffiEngineRuntimeGateway(
         private const val DEFAULT_DEVICE_NAME = "Android Companion"
         private const val NATIVE_LIBRARY_BASENAME = "codex_island_client_ffi"
         private const val REQUEST_THREAD_LIST = "thread-list"
+        private const val REQUEST_INITIALIZE = "initialize"
         private const val REQUEST_THREAD_START = "thread-start"
         private const val REQUEST_THREAD_RESUME = "thread-resume"
         private const val REQUEST_TURN_START = "turn-start"
@@ -1189,6 +1557,109 @@ private enum class SocketState {
     DISCONNECTED,
     CONNECTING,
     OPEN,
+}
+
+private enum class DirectSessionState {
+    DISCONNECTED,
+    CONNECTING,
+    OPEN,
+    FAILED,
+}
+
+private class DirectSshAppServerSession(
+    private val sshTarget: String,
+    private val password: String?,
+    private val keyPair: GeneratedSshKeyPair?,
+    private val onOpen: () -> Unit,
+    private val onLine: (String) -> Unit,
+    private val onFailure: (String) -> Unit,
+) {
+    private var sshClient: SSHClient? = null
+    private var session: Session? = null
+    private var command: Session.Command? = null
+    private var writer: java.io.BufferedWriter? = null
+    private var readerThread: Thread? = null
+
+    fun open() {
+        thread(name = "codex-island-ssh-direct", isDaemon = true) {
+            try {
+                val (user, host, port) = parseTarget(sshTarget)
+                val client = SSHClient()
+                client.addHostKeyVerifier(PromiscuousVerifier())
+                client.connect(host, port)
+                if (keyPair != null) {
+                    client.authPublickey(user, client.loadKeys(keyPair.toJavaKeyPair()))
+                } else {
+                    client.authPassword(user, password ?: error("SSH password is missing"))
+                }
+                val directSession = client.startSession()
+                val directCommand = directSession.exec("exec codex app-server --listen stdio://")
+                sshClient = client
+                session = directSession
+                command = directCommand
+                writer = directCommand.outputStream.bufferedWriter()
+                onOpen()
+
+                readerThread = thread(name = "codex-island-ssh-direct-reader", isDaemon = true) {
+                    try {
+                        directCommand.inputStream.bufferedReader().useLines { lines ->
+                            lines.forEach { line ->
+                                if (line.isNotBlank()) {
+                                    onLine(line)
+                                }
+                            }
+                        }
+                    } catch (throwable: Throwable) {
+                        onFailure(throwable.message ?: "SSH direct reader failed")
+                    }
+                }
+            } catch (throwable: Throwable) {
+                onFailure(throwable.message ?: "SSH direct launch failed")
+            }
+        }
+    }
+
+    fun send(line: String) {
+        val activeWriter = writer ?: error("SSH direct writer is unavailable")
+        activeWriter.write(line)
+        activeWriter.newLine()
+        activeWriter.flush()
+    }
+
+    fun close() {
+        try {
+            writer?.close()
+        } catch (_: Throwable) {
+        }
+        try {
+            command?.close()
+        } catch (_: Throwable) {
+        }
+        try {
+            session?.close()
+        } catch (_: Throwable) {
+        }
+        try {
+            sshClient?.disconnect()
+        } catch (_: Throwable) {
+        }
+        writer = null
+        command = null
+        session = null
+        sshClient = null
+        readerThread?.interrupt()
+        readerThread = null
+    }
+
+    private fun parseTarget(rawTarget: String): Triple<String, String, Int> {
+        val withoutScheme = rawTarget.removePrefix("ssh://")
+        val user = withoutScheme.substringBefore('@', "")
+        val hostPort = withoutScheme.substringAfter('@', "")
+        require(user.isNotBlank() && hostPort.isNotBlank()) { "SSH target must look like user@host" }
+        val host = hostPort.substringBefore(':')
+        val port = hostPort.substringAfter(':', "22").toIntOrNull() ?: 22
+        return Triple(user, host, port)
+    }
 }
 
 private enum class ApprovalKind {

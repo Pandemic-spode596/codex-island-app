@@ -78,6 +78,12 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+
+    packaging {
+        resources {
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
 }
 
 tasks.matching { it.name == "preBuild" }.configureEach {
@@ -93,6 +99,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.hierynomus:sshj:0.39.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("androidx.arch.core:core-testing:2.2.0")

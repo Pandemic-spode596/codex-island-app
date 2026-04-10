@@ -14,9 +14,15 @@ The current Android project now includes:
 - secure local storage for host tokens and pairing state
 - a thread/chat workspace shell with approval and user-input placeholders
 - generated UniFFI bindings checked into `app/src/main/java/uniffi/codex_island_client/`
+- two transport entry styles:
+  - `host:7331` or `ws://...` for direct `hostd` websocket mode
+  - `ssh://user@host` or `user@host` for SSH direct mode that launches remote `codex app-server`
 
-The remaining gap before real end-to-end transport is packaging an
-Android-loadable `island-client-ffi` native library.
+The SSH direct path is the first Android step toward macOS-style remote parity.
+The current implementation can also generate an RSA SSH keypair per SSH host
+profile and surface a ready-to-copy `authorized_keys` install command in the
+UI. Password auth remains available as a fallback; the existing `Auth token`
+field acts as the SSH password when the host input is an SSH target.
 
 Regenerate the Kotlin and Swift UniFFI bindings from the repository root with:
 

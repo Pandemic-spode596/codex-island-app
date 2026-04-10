@@ -13,7 +13,9 @@ class SecureShellStoreTest {
         assertEquals("linux.tail.ts.net:7331", parsed.hostAddress)
         assertEquals("Linux Box", parsed.displayName)
         assertEquals("abc123", parsed.authToken)
+        assertEquals(null, parsed.sshPassword)
         assertEquals("PAIR-777", parsed.pairingCode)
+        assertEquals(HostConnectionMode.HOSTD_WEBSOCKET, parsed.connectionMode)
     }
 
     @Test
@@ -23,6 +25,16 @@ class SecureShellStoreTest {
         assertEquals("macbook.tail.ts.net:7331", parsed.hostAddress)
         assertEquals(null, parsed.displayName)
         assertEquals(null, parsed.authToken)
+        assertEquals(null, parsed.sshPassword)
         assertEquals(null, parsed.pairingCode)
+        assertEquals(HostConnectionMode.HOSTD_WEBSOCKET, parsed.connectionMode)
+    }
+
+    @Test
+    fun parseHostInputTreatsSshTargetAsDirectMode() {
+        val parsed = SecureShellStore.parseHostInput("ssh://deploy@linux.tail.ts.net")
+
+        assertEquals("ssh://deploy@linux.tail.ts.net", parsed.hostAddress)
+        assertEquals(HostConnectionMode.SSH_DIRECT_APP_SERVER, parsed.connectionMode)
     }
 }
