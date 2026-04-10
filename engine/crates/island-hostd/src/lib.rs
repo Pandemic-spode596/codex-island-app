@@ -1053,13 +1053,29 @@ mod tests {
     impl FakeAppServerHarness {
         fn new(script: &str) -> Self {
             let temp = unique_temp_dir("hostd-harness");
-            let mut hostd = HostDaemon::new(HostDaemonConfig {
+            let hostd = HostDaemon::new(HostDaemonConfig {
                 host_id: "host-harness".into(),
                 hostname: "devbox".into(),
                 platform: HostPlatform::Macos,
                 spawn: SpawnConfig::new("/bin/sh").args(["-c", script]),
                 state_dir: temp.join("state"),
             });
+            Self::from_hostd(hostd)
+        }
+
+        fn with_spawn(spawn: SpawnConfig) -> Self {
+            let temp = unique_temp_dir("hostd-real-app-server");
+            let hostd = HostDaemon::new(HostDaemonConfig {
+                host_id: "host-real".into(),
+                hostname: "devbox".into(),
+                platform: current_test_platform(),
+                spawn,
+                state_dir: temp.join("state"),
+            });
+            Self::from_hostd(hostd)
+        }
+
+        fn from_hostd(mut hostd: HostDaemon) -> Self {
             hostd.start();
 
             let pairing_code = match &hostd.handle_command(ClientCommand::PairStart {
@@ -1100,6 +1116,15 @@ mod tests {
                 params,
             });
             assert!(events.is_empty(), "unexpected request events: {events:?}");
+        }
+
+        fn send_notification(&mut self, method: &str, params: serde_json::Value) {
+            self.hostd
+                .send_to_app_server(json!({
+                    "method": method,
+                    "params": params,
+                }))
+                .expect("forward app-server notification");
         }
 
         fn interrupt(&mut self, thread_id: &str, turn_id: &str) {
@@ -1594,6 +1619,68 @@ mod tests {
     }
 
     #[test]
+    fn hostd_runs_real_codex_app_server_handshake_when_available() {
+        let Some(codex_path) = find_codex_binary() else {
+            eprintln!("skipping real codex app-server handshake test: codex not found on PATH");
+            return;
+        };
+        let mut harness = FakeAppServerHarness::with_spawn(
+            SpawnConfig::new(codex_path).args(["app-server", "--listen", "stdio://"]),
+        );
+
+        harness.send_request(
+            "req-init",
+            "initialize",
+            json!({
+                "capabilities": {
+                    "experimentalApi": true
+                },
+                "clientInfo": {
+                    "name": "codex_island",
+                    "title": "Codex Island",
+                    "version": "0.1.0"
+                }
+            }),
+        );
+
+        let init_events = harness.poll_until(Duration::from_secs(10), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ServerEvent::AppServerResponse { request_id, result }
+                    if request_id == "req-init" && result.get("codexHome").is_some()
+                )
+            })
+        });
+        assert!(init_events.iter().any(|event| matches!(
+            event,
+            ServerEvent::AppServerResponse { request_id, result }
+            if request_id == "req-init"
+                && result.get("userAgent").and_then(|value| value.as_str()).is_some()
+                && result["platformFamily"] == json!("unix")
+                && result["platformOs"] == json!(expected_platform_os())
+        )));
+
+        harness.send_notification("initialized", serde_json::Value::Null);
+        harness.send_request("req-list", "thread/list", json!({ "limit": 1 }));
+
+        let list_events = harness.poll_until(Duration::from_secs(10), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ServerEvent::AppServerResponse { request_id, result }
+                    if request_id == "req-list" && result.get("data").is_some()
+                )
+            })
+        });
+        assert!(list_events.iter().any(|event| matches!(
+            event,
+            ServerEvent::AppServerResponse { request_id, result }
+            if request_id == "req-list" && result.get("data").is_some()
+        )));
+    }
+
+    #[test]
     fn hostd_rejects_wrong_protocol_version() {
         let mut hostd = HostDaemon::new(HostDaemonConfig {
             host_id: "host-4".into(),
@@ -1868,5 +1955,34 @@ mod tests {
         path.push(unique);
         fs::create_dir_all(&path).expect("create temp dir");
         path
+    }
+
+    fn find_codex_binary() -> Option<PathBuf> {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path).find_map(|entry| {
+                let candidate = entry.join("codex");
+                if candidate.is_file() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    fn current_test_platform() -> HostPlatform {
+        if cfg!(target_os = "macos") {
+            HostPlatform::Macos
+        } else {
+            HostPlatform::Linux
+        }
+    }
+
+    fn expected_platform_os() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        }
     }
 }

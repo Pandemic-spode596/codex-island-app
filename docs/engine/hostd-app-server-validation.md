@@ -9,6 +9,7 @@
 - cwd 语义：hostd 在 spawn 子进程时显式设置 `current_dir`，子进程实际工作目录可被验证。
 - 失败模式：非零退出码和 `stderr` 输出会被保留，供上层连接状态机映射为可见错误。
 - 主动停止：hostd 关闭 stdin 并终止长生命周期子进程，保证不会留下孤儿 `app-server`。
+- 真实握手：在当前机器存在 `codex` CLI 时，测试会启动真实 `codex app-server --listen stdio://`，验证 `initialize` 返回、`initialized` notification 转发，以及后续 `thread/list` JSONL response 仍能被 hostd 正常桥接。
 
 对应测试位置：
 
@@ -17,10 +18,9 @@
 对 macOS / Linux 的含义：
 
 - 上述验证全部基于 Unix 进程模型和 `/bin/sh` / `/bin/pwd` 等基础命令，在 macOS 与 Linux 都可执行。
-- 当前还没有覆盖真正的 `codex app-server` 握手，也没有覆盖 hostd 重启退避、日志轮转、环境变量白名单等更高层行为。
+- 当前已经覆盖真正的 `codex app-server` 基本握手和后续请求 framing，但还没有覆盖 hostd 重启退避、日志轮转、环境变量白名单等更高层行为。
 
 后续建议：
 
-- 用真实 `codex app-server --listen stdio://` 增加一个可选集成测试，验证初始化握手和 JSONL framing。
 - 将这套 supervisor 抽成 hostd 正式 runtime，统一给 macOS shell、未来 Android shell 和 host daemon 复用。
 - 在 hostd 实现中补充 restart policy、stderr ring buffer 与显式 health probe。

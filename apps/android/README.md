@@ -63,6 +63,13 @@ Run build + JVM tests + device/emulator instrumentation tests:
 ./scripts/android-test.sh --connected
 ```
 
+Start a real hostd endpoint on a same-tailnet macOS/Linux host for Android
+acceptance:
+
+```bash
+./scripts/run-hostd-acceptance.sh --bind <tailscale-ip-or-hostname>:7331
+```
+
 The repository now includes:
 
 - a Robolectric JVM test for `MainActivity`
