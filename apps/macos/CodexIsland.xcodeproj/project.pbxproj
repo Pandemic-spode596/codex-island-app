@@ -608,8 +608,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/mixpanel/mixpanel-swift";
 			requirement = {
-				branch = master;
-				kind = branch;
+				kind = exactVersion;
+				version = 6.2.0;
 			};
 		};
 		FD33FD712EDF32D7002A6548 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
