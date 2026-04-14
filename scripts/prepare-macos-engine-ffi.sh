@@ -6,11 +6,38 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE_DIR="$ROOT_DIR/engine"
 GENERATED_DIR="$ROOT_DIR/apps/macos/Generated/Engine"
 OUT_DIR="${1:-}"
+USER_HOME="${HOME:-$(eval echo "~$(id -un)")}"
+
+ensure_rust_toolchain() {
+    if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [[ -r "$USER_HOME/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "$USER_HOME/.cargo/env"
+    fi
+
+    if [[ -d "$USER_HOME/.cargo/bin" ]]; then
+        export PATH="$USER_HOME/.cargo/bin:$PATH"
+    fi
+
+    if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Rust toolchain not found. Install Rust with rustup or ensure cargo/rustc are on PATH for Xcode build scripts." >&2
+    echo "Checked PATH=$PATH" >&2
+    echo "Expected rustup env at $USER_HOME/.cargo/env" >&2
+    exit 127
+}
 
 if [[ -z "$OUT_DIR" ]]; then
     echo "usage: $0 <frameworks-output-dir>" >&2
     exit 1
 fi
+
+ensure_rust_toolchain
 
 cd "$ENGINE_DIR"
 
