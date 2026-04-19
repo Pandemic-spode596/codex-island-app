@@ -255,15 +255,27 @@ final class SSHStdioTransport: RemoteAppServerTransport, @unchecked Sendable {
         // stdio/JSONL without shell prompt or line-editing interference.
         self.transport = ProcessStdioTransport(
             executableURL: URL(fileURLWithPath: "/usr/bin/ssh"),
-            arguments: [
-                "-T",
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=5",
-                host.sshTarget,
-                "codex", "app-server", "--listen", "stdio://"
-            ],
+            arguments: Self.sshArguments(host: host),
             queueLabel: "com.codexisland.remote-ssh-transport"
         )
+    }
+
+    nonisolated static func sshArguments(host: RemoteHostConfig) -> [String] {
+        var arguments = [
+            "-T",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            host.sshTarget,
+            "codex"
+        ]
+
+        let defaultCwd = host.defaultCwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !defaultCwd.isEmpty {
+            arguments.append(contentsOf: ["--cd", defaultCwd])
+        }
+
+        arguments.append(contentsOf: ["app-server", "--listen", "stdio://"])
+        return arguments
     }
 
     func start(
@@ -322,9 +334,13 @@ final class LocalCodexAppServerTransport: RemoteAppServerTransport, @unchecked S
             executableURL: URL(fileURLWithPath: resolvedShell),
             arguments: [
                 "-lc",
-                "exec codex app-server --listen stdio://"
+                Self.localAppServerCommand()
             ]
         )
+    }
+
+    nonisolated static func localAppServerCommand() -> String {
+        "exec codex app-server --listen stdio://"
     }
 
     func start(

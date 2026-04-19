@@ -235,8 +235,33 @@ where
     })
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn codex_app_server_shell_command(cwd: Option<&Path>) -> String {
+    match cwd.and_then(|value| value.to_str()).map(str::trim).filter(|value| !value.is_empty()) {
+        Some(cwd) => format!(
+            "exec codex --cd {} app-server --listen stdio://",
+            shell_quote(cwd)
+        ),
+        None => "exec codex app-server --listen stdio://".to_string(),
+    }
+}
+
 pub fn codex_app_server_command(shell: &Path) -> SpawnConfig {
-    SpawnConfig::new(shell).args(["-lc", "exec codex app-server --listen stdio://"])
+    codex_app_server_command_with_cwd(shell, None)
+}
+
+pub fn codex_app_server_command_with_cwd(shell: &Path, cwd: Option<&Path>) -> SpawnConfig {
+    let mut config = SpawnConfig::new(shell).args(vec![
+        "-lc".to_string(),
+        codex_app_server_shell_command(cwd),
+    ]);
+    if let Some(cwd) = cwd {
+        config = config.cwd(cwd);
+    }
+    config
 }
 
 #[derive(Debug, Clone)]
@@ -1028,6 +1053,7 @@ fn send_server_events(
 
 #[cfg(test)]
 mod tests {
+    use crate::codex_app_server_command_with_cwd;
     use std::fs;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
@@ -1157,6 +1183,20 @@ mod tests {
             ]
         );
         assert_eq!(config.cwd, None);
+    }
+
+    #[test]
+    fn codex_command_propagates_cwd_into_launch_contract() {
+        let config = codex_app_server_command_with_cwd(Path::new("/bin/zsh"), Some(Path::new("/tmp/repo root")));
+        assert_eq!(config.program, PathBuf::from("/bin/zsh"));
+        assert_eq!(
+            config.args,
+            vec![
+                "-lc".to_string(),
+                "exec codex --cd '/tmp/repo root' app-server --listen stdio://".to_string()
+            ]
+        );
+        assert_eq!(config.cwd, Some(PathBuf::from("/tmp/repo root")));
     }
 
     #[test]

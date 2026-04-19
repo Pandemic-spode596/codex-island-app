@@ -17,6 +17,51 @@ final class RemoteAppServerTransportTests: XCTestCase {
         XCTAssertEqual(config.arguments, ["-lc", "exec codex app-server --listen stdio://"])
     }
 
+    func testSSHTransportIncludesRemoteDefaultCwdWhenConfigured() {
+        let host = RemoteHostConfig(
+            id: "host-1",
+            name: "Remote",
+            sshTarget: "devbox",
+            defaultCwd: "/srv/repo",
+            isEnabled: true
+        )
+
+        XCTAssertEqual(
+            SSHStdioTransport.sshArguments(host: host),
+            [
+                "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "devbox",
+                "codex",
+                "--cd", "/srv/repo",
+                "app-server", "--listen", "stdio://"
+            ]
+        )
+    }
+
+    func testSSHTransportOmitsRemoteDefaultCwdWhenEmpty() {
+        let host = RemoteHostConfig(
+            id: "host-1",
+            name: "Remote",
+            sshTarget: "devbox",
+            defaultCwd: "  ",
+            isEnabled: true
+        )
+
+        XCTAssertEqual(
+            SSHStdioTransport.sshArguments(host: host),
+            [
+                "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "devbox",
+                "codex",
+                "app-server", "--listen", "stdio://"
+            ]
+        )
+    }
+
     func testProcessTransportFlushesResidualStdoutAndStderrOnEOF() async throws {
         let recorder = LineRecorder()
         let terminated = expectation(description: "process terminated")
