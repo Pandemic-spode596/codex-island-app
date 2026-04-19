@@ -9,8 +9,6 @@ import Darwin
 import Foundation
 
 nonisolated struct SSHConfigAliasDiscovery: Sendable {
-    let fileManager: FileManager
-
     nonisolated func discoverAliases(from fileURL: URL) -> [String] {
         var visitedPaths: Set<String> = []
         return discoverAliases(from: fileURL, visitedPaths: &visitedPaths)

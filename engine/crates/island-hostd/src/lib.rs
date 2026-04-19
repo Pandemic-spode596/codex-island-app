@@ -573,13 +573,56 @@ impl HostDaemon {
     pub fn poll(&mut self) -> Vec<ServerEvent> {
         let mut events = Vec::new();
 
-        while let Some(child) = self.child.as_ref() {
+        if let Some(child) = self.child.as_ref() {
+            let pending_events = Self::collect_child_events(child);
+            self.append_child_events(pending_events, &mut events);
+        }
+
+        let exit = self
+            .child
+            .as_mut()
+            .and_then(|child| child.poll_exit().ok().flatten());
+
+        if let Some(exit) = exit {
+            if let Some(child) = self.child.as_ref() {
+                let trailing_events = Self::collect_child_events(child);
+                self.append_child_events(trailing_events, &mut events);
+            }
+
+            self.child = None;
+            self.last_exit_code = exit.code;
+            self.observed_at = now_string();
+            let failed_health =
+                self.health_snapshot(HostHealthStatus::Failed, AppServerLifecycleState::Failed);
+            events.push(ServerEvent::HostHealthChanged {
+                health: failed_health,
+            });
+            self.restart_count += 1;
+            events.extend(self.ensure_child_started());
+        }
+
+        events
+    }
+
+    fn collect_child_events(child: &ManagedChild) -> Vec<ChildEvent> {
+        let mut pending_events = Vec::new();
+        loop {
             match child.try_recv_event() {
-                Ok(ChildEvent::StdoutLine(line)) => {
+                Ok(event) => pending_events.push(event),
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        pending_events
+    }
+
+    fn append_child_events(&mut self, child_events: Vec<ChildEvent>, events: &mut Vec<ServerEvent>) {
+        for event in child_events {
+            match event {
+                ChildEvent::StdoutLine(line) => {
                     self.observed_at = now_string();
                     events.extend(self.normalize_stdout_line(&line));
                 }
-                Ok(ChildEvent::StderrLine(line)) => {
+                ChildEvent::StderrLine(line) => {
                     self.observed_at = now_string();
                     self.last_error = Some(line.clone());
                     events.push(ServerEvent::HostHealthChanged {
@@ -589,26 +632,8 @@ impl HostDaemon {
                         ),
                     });
                 }
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
-
-        if let Some(child) = self.child.as_mut() {
-            if let Ok(Some(exit)) = child.poll_exit() {
-                self.child = None;
-                self.last_exit_code = exit.code;
-                self.observed_at = now_string();
-                let failed_health =
-                    self.health_snapshot(HostHealthStatus::Failed, AppServerLifecycleState::Failed);
-                events.push(ServerEvent::HostHealthChanged {
-                    health: failed_health,
-                });
-                self.restart_count += 1;
-                events.extend(self.ensure_child_started());
-            }
-        }
-
-        events
     }
 
     pub fn snapshot(&self) -> EngineSnapshot {

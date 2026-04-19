@@ -74,27 +74,22 @@ final class RemoteSessionController: ObservableObject {
         self.backend = backend
 
         backend.hostsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.hosts = $0 }
             .store(in: &cancellables)
 
         backend.threadsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.threads = $0 }
             .store(in: &cancellables)
 
         backend.hostStatesPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.hostStates = $0 }
             .store(in: &cancellables)
 
         backend.hostActionErrorsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.hostActionErrors = $0 }
             .store(in: &cancellables)
 
         backend.hostActionInProgressPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.hostActionInProgress = $0 }
             .store(in: &cancellables)
     }

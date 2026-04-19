@@ -88,7 +88,7 @@ actor SSHConfigHostSuggestionProvider {
         self.fileManager = fileManager
         self.processExecutor = processExecutor
         self.configURL = configURL ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/config")
-        self.aliasDiscovery = SSHConfigAliasDiscovery(fileManager: fileManager)
+        self.aliasDiscovery = SSHConfigAliasDiscovery()
     }
 
     func loadSuggestions() async -> [SSHConfigHostSuggestion] {

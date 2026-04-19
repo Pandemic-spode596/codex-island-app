@@ -188,7 +188,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
 
     private func bindPrimaryPublishers() {
         primary.hostsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.primaryHosts = value
                 self?.rebuildProjection()
@@ -196,7 +195,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         primary.threadsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.primaryThreads = value
                 self?.rebuildProjection()
@@ -204,7 +202,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         primary.hostStatesPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.primaryHostStates = value
                 self?.rebuildProjection()
@@ -212,7 +209,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         primary.hostActionErrorsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.primaryHostActionErrors = value
                 self?.rebuildProjection()
@@ -220,7 +216,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         primary.hostActionInProgressPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.primaryHostActionInProgress = value
                 self?.rebuildProjection()
@@ -230,7 +225,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
 
     private func bindSecondaryPublishers() {
         secondary.hostsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.secondaryHosts = value
                 self?.rebuildProjection()
@@ -238,7 +232,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         secondary.threadsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.secondaryThreads = value
                 self?.rebuildProjection()
@@ -246,7 +239,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         secondary.hostStatesPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.secondaryHostStates = value
                 self?.rebuildProjection()
@@ -254,7 +246,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         secondary.hostActionErrorsPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.secondaryHostActionErrors = value
                 self?.rebuildProjection()
@@ -262,7 +253,6 @@ final class CompositeRemoteSessionBackend: ObservableObject, RemoteSessionContro
             .store(in: &cancellables)
 
         secondary.hostActionInProgressPublisher
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] value in
                 self?.secondaryHostActionInProgress = value
                 self?.rebuildProjection()
